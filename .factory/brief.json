@@ -1,0 +1,12 @@
+{
+  "slug": "pairplay-motion",
+  "title": "PairPlay Motion",
+  "territory": "games-creative",
+  "user": "Friends and families with spare phones or split Joy-Cons who want a frictionless motion-controller party-game setup in a browser.",
+  "smallest_useful_product": "A QR-pairing PWA with a host screen, two-phone motion calibration, and three original 2–4 player reaction games; it runs over local Wi-Fi and shows an explicit permission screen.",
+  "success_measure": "Two first-time players reach a calibrated playable round within 90 seconds on supported mobile browsers, with at least 80% completing a five-minute session.",
+  "artifact_class": "web-with-backend",
+  "monetization": "one-time",
+  "constraints": "Motion-sensor access requires browser permission and iOS-specific handling; use LAN/WebRTC where possible, do not retain sensor streams, and disclose that low-end devices vary.",
+  "state": "RESEARCHED"
+}
