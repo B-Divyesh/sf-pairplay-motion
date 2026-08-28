@@ -46,3 +46,14 @@ test('privacy and terms have real routes', async ({ page }) => {
   await page.goto('/terms');
   await expect(page.getByRole('heading', { name: 'Terms of play' })).toBeVisible();
 });
+
+test('installed shell reloads with an offline state', async ({ page, context }) => {
+  await page.goto('/');
+  await page.evaluate(() => navigator.serviceWorker.ready);
+  await page.reload();
+  await context.setOffline(true);
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await expect(page.getByText('OFFLINE', { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Host a game' })).toBeVisible();
+  await context.setOffline(false);
+});

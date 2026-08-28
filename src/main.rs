@@ -24,6 +24,7 @@ use sqlx::{
 };
 use tokio::sync::{mpsc, RwLock};
 use tower_http::{
+    compression::CompressionLayer,
     services::{ServeDir, ServeFile},
     trace::TraceLayer,
 };
@@ -100,16 +101,25 @@ async fn main() -> anyhow::Result<()> {
 }
 
 fn build_router(state: AppState, static_dir: &str) -> Router {
-    let fallback = ServeDir::new(static_dir)
-        .not_found_service(ServeFile::new(Path::new(static_dir).join("index.html")));
+    let root = Path::new(static_dir);
     Router::new()
         .route("/health", get(health))
         .route("/api/rooms", post(create_room))
         .route("/api/page-view", post(page_view))
         .route("/ws", get(ws_handler))
-        .fallback_service(fallback)
+        .route_service("/sw.js", ServeFile::new(root.join("sw.js")))
+        .route_service("/icon.svg", ServeFile::new(root.join("icon.svg")))
+        .route_service(
+            "/manifest.webmanifest",
+            ServeFile::new(root.join("manifest.webmanifest")),
+        )
+        .route_service("/robots.txt", ServeFile::new(root.join("robots.txt")))
+        .route_service("/sitemap.xml", ServeFile::new(root.join("sitemap.xml")))
+        .nest_service("/assets", ServeDir::new(root.join("assets")))
+        .fallback_service(ServeFile::new(root.join("index.html")))
         .layer(DefaultBodyLimit::max(8 * 1024))
         .layer(middleware::from_fn(security_headers))
+        .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }

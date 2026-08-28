@@ -1,6 +1,5 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import QRCode from 'qrcode';
   import { checkoutUrl, captureLicense, cachedUnlock, saveLicense, verifyLicense } from './lib/license';
   import { cueEvery, gameDetails, initialCue, nextCue, scoreSample, type Cue, type GameId, type MotionSample, type PlayerRound } from './lib/game';
 
@@ -22,7 +21,7 @@
   let qrCanvas: HTMLCanvasElement;
   let copied = false;
   let controllerId = '';
-  let sensorMode: 'waiting' | 'calibrating' | 'motion' | 'touch' | 'denied' = 'waiting';
+  let sensorMode: 'standby' | 'waiting' | 'calibrating' | 'motion' | 'touch' | 'denied' = 'standby';
   let controllerMessage = 'Waiting for the host.';
   let controllerCue: Cue | '' = '';
   let controllerScore = 0;
@@ -90,7 +89,10 @@
       const data = await response.json() as { code: string; host_token: string };
       roomCode = data.code; hostToken = data.host_token; screen = 'host';
       connectHost();
-      setTimeout(() => QRCode.toCanvas(qrCanvas, joinUrl(), { width: 216, margin: 1, color: { dark: '#171714', light: '#fffdf5' } }), 0);
+      setTimeout(async () => {
+        const QRCode = (await import('qrcode')).default;
+        await QRCode.toCanvas(qrCanvas, joinUrl(), { width: 216, margin: 1, color: { dark: '#171714', light: '#fffdf5' } });
+      }, 0);
     } catch { error = 'Could not open a room. Check the connection and try again.'; }
     finally { busy = false; }
   }
@@ -188,10 +190,13 @@
       addMotionListeners(); calibrationSamples = [];
       controllerMessage = 'Calibrating… keep the phone upright and still for two seconds.';
       window.setTimeout(() => {
-        if (calibrationSamples.length) {
-          baseBeta = calibrationSamples.reduce((sum, value) => sum + value[0], 0) / calibrationSamples.length;
-          baseGamma = calibrationSamples.reduce((sum, value) => sum + value[1], 0) / calibrationSamples.length;
+        if (calibrationSamples.length < 3) {
+          removeMotionListeners(); sensorMode = 'denied';
+          error = 'No motion readings arrived. This browser can still play with touch controls.';
+          return;
         }
+        baseBeta = calibrationSamples.reduce((sum, value) => sum + value[0], 0) / calibrationSamples.length;
+        baseGamma = calibrationSamples.reduce((sum, value) => sum + value[1], 0) / calibrationSamples.length;
         sensorMode = 'motion'; controllerMessage = 'Motion ready. Keep this screen awake.';
         send({ type: 'calibrated', mode: 'motion', name: playerName });
       }, 2000);
@@ -241,13 +246,13 @@
   }
   function pulseMotion(x: number, y: number, shake = 0) {
     touchMotion(x, y, shake);
-    if (!shake) window.setTimeout(() => touchMotion(0, 0), 180);
+    window.setTimeout(() => touchMotion(0, 0), 180);
   }
 
   function keyboardMotion(event: KeyboardEvent) {
     if (screen !== 'controller' || sensorMode !== 'touch') return;
     const motion: Record<string, [number, number, number]> = { ArrowLeft: [-24, 0, 0], ArrowRight: [24, 0, 0], ArrowUp: [0, -24, 0], ArrowDown: [0, 24, 0], ' ': [0, 0, 10] };
-    if (motion[event.key]) { event.preventDefault(); touchMotion(...motion[event.key]); }
+    if (motion[event.key]) { event.preventDefault(); pulseMotion(...motion[event.key]); }
   }
 
   function startGame(game: GameId) {
@@ -455,7 +460,9 @@
       <p class="controller-message" aria-live="polite">{controllerMessage}</p>
       {#if controllerCue}<div class="phone-cue" aria-label={`Current cue: ${controllerCue}`}>{controllerCue}</div><p class="phone-score">Score <strong>{controllerScore}</strong></p>{/if}
 
-      {#if sensorMode === 'waiting' || sensorMode === 'denied'}
+      {#if sensorMode === 'standby'}
+        <div class="empty-state"><span class="empty-mark">◎</span><h3>Connected to the room</h3><p>The host will ask every phone to calibrate together.</p></div>
+      {:else if sensorMode === 'waiting' || sensorMode === 'denied'}
         <div class="permission-sheet">
           <p class="section-no">Explicit permission</p><h3>Use this phone’s motion?</h3>
           <p>PairPlay reads tilt and acceleration only while this controller page is open. Samples are relayed to the host room, never saved, sold, or used for ads.</p>
