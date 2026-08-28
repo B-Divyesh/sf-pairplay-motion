@@ -1,121 +1,84 @@
-# PairPlay Motion — build handoff
+# PairPlay Motion — repair handoff
 
-> ## Verification disposition — **FAIL**
->
-> Independent verification on 2026-08-28 tested candidate
-> `6c0b0f250271f166365e004decf63c1647788bb4` against
-> `https://pairplay-motion.sociobot.in`. Local install, type checks, 10 unit/
-> route tests, production frontend and Rust release builds, and all 8 Playwright
-> E2E tests passed. The deployed frontend assets match the fresh candidate
-> build byte-for-byte. Release verification fails because live `/health`
-> reports `{"build":"container"}` rather than the candidate SHA, so the
-> backend deployment cannot be identified. A fifth player also receives a
-> misleading generic disconnect instead of a room-full recovery message, and
-> the public room/WebSocket endpoints lack rate limiting. See
-> [`.factory/verification.md`](verification.md) for exact commands, evidence,
-> severity, and required remediation.
+Date: 2026-08-28
+Work order: `pairplay-motion-repair-1`
+Artifact: the existing Rust/Axum + Svelte PWA one-container web app
 
-Date: 2026-08-28  
-Work order: `pairplay-motion-build-1`  
-Artifact: one-container web app with Axum backend and Svelte PWA
+## Release disposition — PASS
 
-## What shipped
+This repair addresses every blocker in the independent report at
+`.factory/verification.md` for candidate
+`6c0b0f250271f166365e004decf63c1647788bb4`. The deployed repair source is
+commit `40d42ba0a21ae7debf6ba5cc6085ad1abffc2e56`; it is pushed to `main` and
+live at `https://pairplay-motion.sociobot.in`.
 
-- A complete host-to-phone room flow with cryptographically random six-character
-  room codes, an original QR invite, manual join, 2–4 player roster, disconnect
-  handling, and reconnect action.
-- Explicit motion permission and two-second neutral calibration that handles
-  iOS permission methods. Browsers that deny access or emit no sensor readings
-  get a fully playable touch and keyboard controller.
-- Three original 40-second reaction games with live shared scores:
-  - **Dead Still** — alternate between moving and holding still (free).
-  - **News Desk** — race to match changing tilt directions (full edition).
-  - **Ink Runner** — shake only while the presses say GO (full edition).
-- One-time US $8 Sociobot license unlock: hosted checkout link, URL token
-  capture/cleanup, local storage, daily verification cache, background
-  reconciliation, invalid-license notice, and paste-to-restore flow. No product
-  ID or payment provider is embedded.
-- Privacy-local architecture: live names and motion samples exist only in the
-  room process memory. SQLite stores only one aggregate page-view integer per
-  UTC day. There are no accounts, tracking scripts, or third-party fonts.
-- Installable offline shell with a versioned service worker, automatic hashed
-  asset discovery, offline status, responsive icon/manifest, Brotli/gzip, and
-  immutable asset caching.
-- Real `/privacy` and `/terms` routes with 200 responses, safety copy, direct-
-  route SPA fallback, structured JSON logs, security headers, a build-aware
-  `/health`, graceful shutdown, and a non-root multi-stage container.
-- A product-specific monochrome broadsheet system and original generated hero
-  collage. Source, exact generation prompt, and provenance are under
-  `assets/src/`; mobile/desktop WebPs are 33 KB and 104 KB.
+Live proof, after the container deployment:
 
-## Run and deploy
+```json
+{"build":"40d42ba0a21ae7debf6ba5cc6085ad1abffc2e56","status":"ok"}
+```
+
+The published image is
+`sociobotregistry.azurecr.io/sf-pairplay-motion:40d42ba0a21a` at digest
+`sha256:68eda5139b30f9ee476247b16a71d36ee05af2367ad7dc3d80f8696169d5bfa0`.
+
+## What changed
+
+- Container releases now require a non-empty, non-`container` `BUILD_SHA` at
+  build time. `/health` reports that compiled identifier, preventing an
+  unverifiable placeholder deployment.
+- WebSocket admission is now atomic with player insertion. A full or missing
+  room upgrades first and sends an application close frame (`4003` or `4004`),
+  which browsers expose to the controller UI. The fifth player sees “This room
+  already has four players.”; a missing room receives code recovery guidance.
+- Public `/api/rooms` and `/ws` requests have source-address and service-wide
+  token buckets. Room creation allows a burst of 12 then returns `429` with
+  `Retry-After: 5`; WebSocket upgrades allow a burst of 30. Each live socket
+  additionally limits relay input to a 30-message burst and 15 messages per
+  second. Existing message/body/capacity limits remain in place.
+- Added regression coverage for both specific controller recovery paths, room
+  rate-limit response semantics, bounded relay bursts, and the no-placeholder
+  build identity invariant.
+
+## How verified
+
+- Clean install: `npm ci` completed; `npm audit` reported 0 vulnerabilities.
+- `npm test`: Svelte/TypeScript check has 0 errors and 0 warnings; 5 Vitest
+  game-rule tests and 7 Rust route/unit tests passed.
+- `npm run build` passed. Initial app JS is 66.49 KB uncompressed, the
+  on-demand QR chunk is 25.84 KB, and CSS is 11.26 KB.
+- `cargo build --release` passed. A local production build compiled with the
+  exact repair SHA returned it from `/health`; 13 immediate room requests
+  returned twelve `200`s then a `429`.
+- `npm run test:e2e`: **12/12 passed** using Playwright 1.58.2 on desktop
+  Chromium and iPhone 13 Chromium (390px). It covers the original room flow,
+  touch calibration, keyboard controls, desktop/mobile layout, Axe serious and
+  critical violations, offline shell, legal routes, fifth-player recovery, and
+  missing-room recovery.
+- `verify-url.sh https://pairplay-motion.sociobot.in`: 200, 603 ms load, no
+  console/page errors, title and `lang`, one H1, main landmark, no missing
+  image alts, and no unlabelled buttons. Live GET asset responses have Brotli,
+  immutable cache control, CSP, `nosniff`, referrer policy, and sensor/payment
+  permissions policy.
+- Lighthouse mobile local production run: **99 performance / 100
+  accessibility / 100 best practices / 100 SEO**; FCP 1.1 s, LCP 2.0 s, CLS 0.
+
+## Run or redeploy
 
 ```sh
 npm ci
-npm run build             # emits dist/ with index.html at its root
-cargo run                 # serves dist, API, and WebSockets on PORT=8080
+npm test
+npm run build
+cargo build --release
+docker build --build-arg BUILD_SHA="$(git rev-parse HEAD)" -t pairplay-motion .
 ```
 
-Container build command:
+The factory deployment used the required build argument and the existing
+container deployment class. Persist `/app/data` for the anonymous daily counter.
 
-```sh
-docker build --build-arg BUILD_SHA="$(git rev-parse --short HEAD)" -t pairplay-motion .
-```
+## Remaining release smoke
 
-Persist `/app/data` for the anonymous daily count. The service otherwise has no
-persistent room or sensor state. See `README.md` for all environment variables.
-
-## Verification completed
-
-- `npm test`: passed; Svelte/TypeScript check reports 0 errors and 0 warnings,
-  5 Vitest game-rule tests passed, and 5 Rust route/unit tests passed.
-- `npm run test:e2e`: 8/8 passed against the built Axum app across desktop
-  Chromium and a 390px mobile profile. This includes a real host plus two
-  independent controller pages, calibration fallback, round start, direct
-  legal routes, Axe, horizontal overflow, and full offline reload.
-- `npm run build`: passed. Initial JavaScript is 66.55 KB uncompressed
-  (25.84 KB QR chunk loads only after hosting); CSS is 11.26 KB; no fonts ship.
-- `cargo build --release`: passed.
-- `npm audit`: 0 vulnerabilities.
-- `/opt/fleet/lib/verify-url.sh`: 200 response, 561 ms local load, no console
-  errors, title and `lang` present, exactly one `h1`, main landmark present,
-  zero missing image alts, and zero unlabeled buttons.
-- Lighthouse 12 mobile: **99 performance / 100 accessibility / 100 best
-  practices / 100 SEO**; FCP 1.1 s, LCP 2.0 s, TBT 20 ms, CLS 0. The CLI emitted
-  a browser-tab shutdown warning after writing a complete valid report; scores
-  and audits were present.
-- Load smoke: 200 `/health` requests at 20-way concurrency completed 200/200;
-  this exceeds the documented 100 rps smoke volume.
-- Manual screenshot review at 1366×900 and 390×844 confirmed the broadsheet
-  composition, mobile stacking, legibility, and no horizontal overflow.
-- Direct `/privacy` and `/terms` requests return 200. Hashed assets return
-  `content-encoding: br` when accepted and
-  `cache-control: public, max-age=31536000, immutable`.
-
-## Known gaps and release notes
-
-- Real accelerometer/gyroscope behavior must receive a final smoke test on an
-  HTTPS-served iPhone and Android phone; the headless worker cannot emit real
-  hardware events. Permission denial, missing readings, touch, and keyboard
-  paths are automated.
-- The factory still needs to register the `pairplay-motion` paid product and its
-  US $8 price/return URL. The client already uses the production Sociobot
-  contract and `VITE_BILLING_BASE` can target the pilot API for staging.
-- V1 uses an ephemeral same-origin WebSocket relay rather than negotiating a
-  peer-to-peer WebRTC data channel. This keeps first-time setup deterministic
-  across mobile browsers; sensor streams remain unpersisted and room-scoped.
-- The container definition was inspected and both of its build stages were
-  reproduced locally (`npm run build`, `cargo build --release`), but this worker
-  has no Docker/Podman executable, so the assembled OCI image was not launched.
-- Session-completion analytics are intentionally absent. The brief's 80%
-  five-minute retention target should be assessed with consented user testing,
-  not identity-bearing telemetry.
-
-## Next release checks
-
-1. Register the test and live billing product, verify checkout return and refund
-   revocation, then leave the default base on the live API.
-2. Run the 90-second first-use script on one current iPhone/Safari and one
-   mid-range Android/Chrome over HTTPS.
-3. Build and smoke the OCI image in CI, mount a writable `/app/data` volume, and
-   confirm the injected build SHA at `/health`.
+Physical iPhone/Safari and Android/Chrome sensor permission/calibration checks
+remain advisable on HTTPS because headless Chromium cannot generate actual
+accelerometer readings. Permission denial, absent readings, touch fallback,
+and keyboard fallback are automated and remain usable.

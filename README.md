@@ -18,7 +18,10 @@ games support real device motion and a keyboard/touch fallback.
 4. The host starts a 40-second round and sees live scores.
 
 Rooms and motion samples live only in server memory. SQLite holds one anonymous
-aggregate page-view count per day—no IP, identity, or sensor history. See
+aggregate page-view count per day—no IP, identity, or sensor history. Public
+room creation and WebSocket upgrades use source and service-wide token buckets;
+each connected relay is also bounded to a 30-message burst and 15 messages per
+second. See
 [`/privacy`](https://pairplay-motion.sociobot.in/privacy) for the product policy.
 
 ## Stack
@@ -81,7 +84,8 @@ docker run --rm -p 8080:8080 -v pairplay-data:/app/data pairplay-motion
 
 The image runs as the unprivileged `pairplay` user. Deployment is handled by the
 Param Factory; this repository does not manage DNS, billing registration, or
-infrastructure.
+infrastructure. `BUILD_SHA` is required for container builds (and may not be
+`container`), so `/health` always identifies the source of a released backend.
 
 ## Known browser limits
 
