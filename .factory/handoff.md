@@ -1,5 +1,20 @@
 # PairPlay Motion — build handoff
 
+> ## Verification disposition — **FAIL**
+>
+> Independent verification on 2026-08-28 tested candidate
+> `6c0b0f250271f166365e004decf63c1647788bb4` against
+> `https://pairplay-motion.sociobot.in`. Local install, type checks, 10 unit/
+> route tests, production frontend and Rust release builds, and all 8 Playwright
+> E2E tests passed. The deployed frontend assets match the fresh candidate
+> build byte-for-byte. Release verification fails because live `/health`
+> reports `{"build":"container"}` rather than the candidate SHA, so the
+> backend deployment cannot be identified. A fifth player also receives a
+> misleading generic disconnect instead of a room-full recovery message, and
+> the public room/WebSocket endpoints lack rate limiting. See
+> [`.factory/verification.md`](verification.md) for exact commands, evidence,
+> severity, and required remediation.
+
 Date: 2026-08-28  
 Work order: `pairplay-motion-build-1`  
 Artifact: one-container web app with Axum backend and Svelte PWA
