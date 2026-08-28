@@ -40,6 +40,33 @@ test('two players can join, calibrate with fallback, and start a round', async (
   await first.close(); await second.close();
 });
 
+test('a fifth controller is told that the room is full', async ({ browser, page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Host a game' }).click();
+  const code = (await page.getByRole('heading', { name: /Room/ }).textContent())!.replace('Room', '').trim();
+  const controllers = await Promise.all(['Ada', 'Lin', 'Moe', 'Rae'].map(async (name) => {
+    const controller = await browser.newPage();
+    await controller.goto(`/?join=${code}`);
+    await controller.getByLabel('Scoreboard name').fill(name);
+    await controller.getByRole('button', { name: 'Join room' }).click();
+    await expect(controller.getByText('Connected. Look at the host screen.')).toBeVisible();
+    return controller;
+  }));
+  const fifth = await browser.newPage();
+  await fifth.goto(`/?join=${code}`);
+  await fifth.getByLabel('Scoreboard name').fill('Five');
+  await fifth.getByRole('button', { name: 'Join room' }).click();
+  await expect(fifth.getByText('This room already has four players.')).toBeVisible();
+  await Promise.all([...controllers, fifth].map((controller) => controller.close()));
+});
+
+test('a controller gets a specific recovery message for a missing room', async ({ page }) => {
+  await page.goto('/?join=ABC234');
+  await page.getByLabel('Scoreboard name').fill('Ada');
+  await page.getByRole('button', { name: 'Join room' }).click();
+  await expect(page.getByText('Room not found. Check the code with the host.')).toBeVisible();
+});
+
 test('privacy and terms have real routes', async ({ page }) => {
   await page.goto('/privacy');
   await expect(page.getByRole('heading', { name: 'Privacy, in plain language' })).toBeVisible();

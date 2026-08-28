@@ -12,9 +12,11 @@ WORKDIR /build
 COPY Cargo.toml Cargo.lock* ./
 COPY migrations ./migrations
 COPY src ./src
-ARG BUILD_SHA=container
+ARG BUILD_SHA
 ENV BUILD_SHA=$BUILD_SHA
-RUN cargo build --release
+# A release must identify the exact source that built it. Requiring this arg
+# prevents the old, unverifiable "container" placeholder from ever shipping.
+RUN test -n "$BUILD_SHA" && test "$BUILD_SHA" != "container" && cargo build --release
 
 FROM alpine:3.21
 RUN addgroup -S pairplay && adduser -S pairplay -G pairplay && mkdir -p /app/data && chown pairplay:pairplay /app/data

@@ -5,8 +5,8 @@ use std::{
 use axum::{
     body::Body,
     extract::{
-        ws::{Message, WebSocket},
-        DefaultBodyLimit, Query, State, WebSocketUpgrade,
+        ws::{CloseFrame, Message, WebSocket},
+        ConnectInfo, DefaultBodyLimit, Query, State, WebSocketUpgrade,
     },
     http::{header, HeaderValue, Request, StatusCode},
     middleware::{self, Next},
@@ -22,7 +22,7 @@ use sqlx::{
     sqlite::{SqliteConnectOptions, SqlitePoolOptions},
     SqlitePool,
 };
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, Mutex, RwLock};
 use tower_http::{
     compression::CompressionLayer,
     services::{ServeDir, ServeFile},
@@ -35,6 +35,67 @@ use uuid::Uuid;
 struct AppState {
     rooms: Arc<RwLock<HashMap<String, Room>>>,
     db: SqlitePool,
+    limits: Arc<RateLimits>,
+}
+
+/// A small, in-process token bucket is enough for this single-container relay.
+/// It deliberately limits both a source address and the service as a whole so a
+/// proxy misconfiguration cannot turn a shared source address into a bypass.
+struct RateLimits {
+    buckets: Mutex<HashMap<String, TokenBucket>>,
+}
+
+struct TokenBucket {
+    tokens: f64,
+    refreshed_at: Instant,
+}
+
+impl RateLimits {
+    fn new() -> Self {
+        Self {
+            buckets: Mutex::new(HashMap::new()),
+        }
+    }
+
+    async fn allow(&self, key: String, burst: u32, per_second: f64) -> bool {
+        let mut buckets = self.buckets.lock().await;
+        let bucket = buckets.entry(key).or_insert_with(|| TokenBucket {
+            tokens: burst as f64,
+            refreshed_at: Instant::now(),
+        });
+        let now = Instant::now();
+        bucket.tokens = (bucket.tokens
+            + now.duration_since(bucket.refreshed_at).as_secs_f64() * per_second)
+            .min(burst as f64);
+        bucket.refreshed_at = now;
+        if bucket.tokens < 1.0 {
+            return false;
+        }
+        bucket.tokens -= 1.0;
+        true
+    }
+}
+
+impl TokenBucket {
+    fn fresh(burst: u32) -> Self {
+        Self {
+            tokens: burst as f64,
+            refreshed_at: Instant::now(),
+        }
+    }
+
+    fn allow(&mut self, burst: u32, per_second: f64) -> bool {
+        let now = Instant::now();
+        self.tokens = (self.tokens
+            + now.duration_since(self.refreshed_at).as_secs_f64() * per_second)
+            .min(burst as f64);
+        self.refreshed_at = now;
+        if self.tokens < 1.0 {
+            return false;
+        }
+        self.tokens -= 1.0;
+        true
+    }
 }
 
 struct Room {
@@ -87,6 +148,7 @@ async fn main() -> anyhow::Result<()> {
     let state = AppState {
         rooms: Arc::new(RwLock::new(HashMap::new())),
         db,
+        limits: Arc::new(RateLimits::new()),
     };
     let static_dir = env::var("STATIC_DIR").unwrap_or_else(|_| "dist".into());
     let app = build_router(state, &static_dir);
@@ -94,9 +156,12 @@ async fn main() -> anyhow::Result<()> {
     let address = SocketAddr::from(([0, 0, 0, 0], port));
     let listener = tokio::net::TcpListener::bind(address).await?;
     info!(%address, "PairPlay Motion listening");
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
     Ok(())
 }
 
@@ -118,6 +183,10 @@ fn build_router(state: AppState, static_dir: &str) -> Router {
         .nest_service("/assets", ServeDir::new(root.join("assets")))
         .fallback_service(ServeFile::new(root.join("index.html")))
         .layer(DefaultBodyLimit::max(8 * 1024))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            public_rate_limit,
+        ))
         .layer(middleware::from_fn(security_headers))
         .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http())
@@ -125,7 +194,62 @@ fn build_router(state: AppState, static_dir: &str) -> Router {
 }
 
 async fn health() -> Json<Value> {
-    Json(json!({ "status": "ok", "build": option_env!("BUILD_SHA").unwrap_or("development") }))
+    Json(json!({ "status": "ok", "build": build_identity() }))
+}
+
+fn build_identity() -> &'static str {
+    option_env!("BUILD_SHA")
+        .filter(|value| !value.is_empty())
+        .unwrap_or("development")
+}
+
+async fn public_rate_limit(
+    State(state): State<AppState>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    let (scope, source_burst, source_rate, global_burst, global_rate) = match request.uri().path() {
+        "/api/rooms" => ("rooms", 12, 0.2, 120, 2.0),
+        "/ws" => ("websocket", 30, 0.5, 300, 5.0),
+        _ => return next.run(request).await,
+    };
+    let source = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|address| address.0.ip().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    let source_allowed = state
+        .limits
+        .allow(
+            format!("{scope}:source:{source}"),
+            source_burst,
+            source_rate,
+        )
+        .await;
+    let global_allowed = state
+        .limits
+        .allow(format!("{scope}:global"), global_burst, global_rate)
+        .await;
+    if source_allowed && global_allowed {
+        return next.run(request).await;
+    }
+    warn!(%scope, %source, "public endpoint rate limited");
+    let body = if scope == "rooms" {
+        Json(json!({ "error": "Too many room requests. Wait a minute and try again." }))
+            .into_response()
+    } else {
+        (
+            StatusCode::TOO_MANY_REQUESTS,
+            "Too many connection attempts. Wait a moment and try again.",
+        )
+            .into_response()
+    };
+    let mut response = body;
+    *response.status_mut() = StatusCode::TOO_MANY_REQUESTS;
+    response
+        .headers_mut()
+        .insert(header::RETRY_AFTER, HeaderValue::from_static("5"));
+    response
 }
 
 async fn create_room(
@@ -181,26 +305,6 @@ async fn ws_handler(
     {
         return (StatusCode::BAD_REQUEST, "Invalid room code").into_response();
     }
-    {
-        let rooms = state.rooms.read().await;
-        let Some(room) = rooms.get(&room_code) else {
-            return (StatusCode::NOT_FOUND, "Room not found").into_response();
-        };
-        if params.role == "host" {
-            if params.token.as_deref() != Some(room.host_token.as_str()) {
-                return (StatusCode::FORBIDDEN, "Host token rejected").into_response();
-            }
-        } else if params.role == "controller" {
-            if room.players.len() >= 4 {
-                return (StatusCode::CONFLICT, "Room is full").into_response();
-            }
-            if !valid_name(params.name.as_deref().unwrap_or("")) {
-                return (StatusCode::BAD_REQUEST, "Player name is required").into_response();
-            }
-        } else {
-            return (StatusCode::BAD_REQUEST, "Unknown role").into_response();
-        }
-    }
     ws.max_message_size(8 * 1024)
         .on_upgrade(move |socket| socket_session(socket, state, room_code, params))
 }
@@ -211,32 +315,52 @@ async fn socket_session(
     room_code: String,
     params: SocketParams,
 ) {
-    let (mut socket_tx, mut socket_rx) = socket.split();
-    let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
+    if params.role != "host" && params.role != "controller" {
+        close_socket(socket, 4000, "Unknown role").await;
+        return;
+    }
+    if params.role == "controller" && !valid_name(params.name.as_deref().unwrap_or("")) {
+        close_socket(socket, 4000, "Player name is required").await;
+        return;
+    }
+
     let is_host = params.role == "host";
     let player_id = if is_host {
         "host".into()
     } else {
         Uuid::new_v4().simple().to_string()[..8].to_string()
     };
-
-    {
+    let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
+    let admission_error = {
         let mut rooms = state.rooms.write().await;
-        let Some(room) = rooms.get_mut(&room_code) else {
-            return;
-        };
-        if is_host {
-            room.host = Some(tx.clone());
-        } else {
-            room.players.insert(
-                player_id.clone(),
-                PlayerPeer {
-                    name: params.name.unwrap_or_default(),
-                    tx: tx.clone(),
-                },
-            );
+        match rooms.get_mut(&room_code) {
+            None => Some((4004, "Room not found")),
+            Some(room) if is_host && params.token.as_deref() != Some(room.host_token.as_str()) => {
+                Some((4001, "Host token rejected"))
+            }
+            Some(room) if !is_host && room.players.len() >= 4 => Some((4003, "Room is full")),
+            Some(room) => {
+                if is_host {
+                    room.host = Some(tx.clone());
+                } else {
+                    room.players.insert(
+                        player_id.clone(),
+                        PlayerPeer {
+                            name: params.name.clone().unwrap_or_default(),
+                            tx: tx.clone(),
+                        },
+                    );
+                }
+                None
+            }
         }
+    };
+    if let Some((code, reason)) = admission_error {
+        close_socket(socket, code, reason).await;
+        return;
     }
+
+    let (mut socket_tx, mut socket_rx) = socket.split();
     send_json(
         &tx,
         json!({ "type": "welcome", "player_id": player_id, "room": room_code }),
@@ -251,10 +375,15 @@ async fn socket_session(
         }
     });
 
+    let mut relay_limiter = TokenBucket::fresh(30);
     while let Some(Ok(message)) = socket_rx.next().await {
         let Message::Text(text) = message else {
             continue;
         };
+        if !relay_limiter.allow(30, 15.0) {
+            warn!(room = %room_code, peer = %player_id, "websocket relay rate limited");
+            break;
+        }
         let Ok(mut payload) = serde_json::from_str::<Value>(text.as_str()) else {
             continue;
         };
@@ -311,6 +440,15 @@ async fn socket_session(
     }
     broadcast_roster(&state, &room_code).await;
     info!(room = %room_code, peer = %player_id, "peer disconnected");
+}
+
+async fn close_socket(mut socket: WebSocket, code: u16, reason: &str) {
+    let _ = socket
+        .send(Message::Close(Some(CloseFrame {
+            code,
+            reason: reason.to_owned().into(),
+        })))
+        .await;
 }
 
 async fn broadcast_roster(state: &AppState, room_code: &str) {
@@ -422,6 +560,7 @@ mod tests {
         AppState {
             rooms: Arc::new(RwLock::new(HashMap::new())),
             db,
+            limits: Arc::new(RateLimits::new()),
         }
     }
 
@@ -443,7 +582,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn health_route_works() {
+    async fn health_route_has_an_explicit_non_placeholder_identity() {
         let app = build_router(test_state().await, "dist");
         let response = app
             .oneshot(
@@ -455,6 +594,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+        assert_ne!(build_identity(), "container");
     }
 
     #[tokio::test]
@@ -474,6 +614,44 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(state.rooms.read().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn room_creation_is_rate_limited_with_a_retry_hint() {
+        let app = build_router(test_state().await, "dist");
+        for _ in 0..12 {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/rooms")
+                        .body(Body::from("{}"))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/rooms")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.headers().get(header::RETRY_AFTER).unwrap(), "5");
+    }
+
+    #[test]
+    fn websocket_relay_bucket_has_a_bounded_burst() {
+        let mut bucket = TokenBucket::fresh(30);
+        assert!((0..30).all(|_| bucket.allow(30, 15.0)));
+        assert!(!bucket.allow(30, 15.0));
     }
 
     #[tokio::test]

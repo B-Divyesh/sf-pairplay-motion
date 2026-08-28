@@ -153,7 +153,10 @@
       connection = 'lost';
       controllerMessage = event.code === 4004 ? 'Room not found. Check the code with the host.' : event.code === 4003 ? 'This room already has four players.' : 'Connection lost. Rejoin when Wi-Fi returns.';
     };
-    socket.onerror = () => { error = 'Could not join that room. Check the code and Wi-Fi.'; };
+    // Browsers intentionally hide the HTTP status of a failed WebSocket
+    // handshake. The server upgrades then closes with an application code so
+    // the recovery message below is reliable for full and missing rooms.
+    socket.onerror = () => undefined;
     socket.onmessage = (event) => handleControllerMessage(JSON.parse(event.data));
   }
 
