@@ -2,12 +2,26 @@ import { test, expect } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
 
 test('landing page is accessible and responsive', async ({ page }, testInfo) => {
+  const externalRequests: string[] = [];
+  page.on('request', (request) => {
+    const requestUrl = new URL(request.url());
+    if (requestUrl.protocol.startsWith('http') && requestUrl.origin !== 'http://127.0.0.1:8080') externalRequests.push(request.url());
+  });
   await page.goto('/');
+  await page.waitForLoadState('networkidle');
   await expect(page).toHaveTitle(/PairPlay Motion/);
   await expect(page.getByRole('heading', { level: 1 })).toHaveCount(1);
   await expect(page.getByRole('button', { name: 'Host a game' })).toBeVisible();
+  await page.keyboard.press('Tab');
+  await expect(page.getByRole('link', { name: 'Skip to main content' })).toBeFocused();
+  const focusStyle = await page.getByRole('link', { name: 'Skip to main content' }).evaluate((element) => getComputedStyle(element).outlineStyle);
+  expect(focusStyle).toBe('solid');
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  const reducedDuration = await page.getByRole('button', { name: 'Host a game' }).evaluate((element) => Number.parseFloat(getComputedStyle(element).transitionDuration));
+  expect(reducedDuration).toBeLessThanOrEqual(0.00001);
   const results = await new AxeBuilder({ page }).analyze();
   expect(results.violations.filter((violation) => ['serious', 'critical'].includes(violation.impact || ''))).toEqual([]);
+  expect(externalRequests).toEqual([]);
   if (testInfo.project.name === 'mobile') {
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth);
     expect(overflow).toBe(false);
@@ -23,6 +37,10 @@ test('two players can join, calibrate with fallback, and start a round', async (
 
   const first = await browser.newPage();
   const second = await browser.newPage();
+  const keyboardFrames: string[] = [];
+  first.on('websocket', (websocket) => websocket.on('framesent', (frame) => {
+    if (typeof frame.payload === 'string') keyboardFrames.push(frame.payload);
+  }));
   for (const [controller, name] of [[first, 'Ada'], [second, 'Lin']] as const) {
     await controller.goto(`/?join=${code}`);
     await controller.getByLabel('Scoreboard name').fill(name);
@@ -34,6 +52,11 @@ test('two players can join, calibrate with fallback, and start a round', async (
   await first.getByRole('button', { name: 'Use touch controls instead' }).click();
   await second.getByRole('button', { name: 'Use touch controls instead' }).click();
   await expect(page.getByText('✓ Calibrated')).toHaveCount(2);
+  keyboardFrames.length = 0;
+  await first.keyboard.press('ArrowLeft');
+  await first.keyboard.press('Space');
+  await expect.poll(() => keyboardFrames.some((frame) => frame.includes('"x":-24'))).toBe(true);
+  await expect.poll(() => keyboardFrames.some((frame) => frame.includes('"shake":10'))).toBe(true);
   await page.getByRole('button', { name: 'Play Dead Still' }).click();
   await expect(page.getByText(/MOVE|FREEZE/, { exact: true })).toBeVisible();
   await expect(first.locator('.phone-score')).toContainText('Score');
@@ -78,6 +101,23 @@ test('installed shell reloads with an offline state', async ({ page, context }) 
   await page.goto('/');
   await page.evaluate(() => navigator.serviceWorker.ready);
   await page.reload();
+  const updateEvidence = await page.evaluate(async () => {
+    const registration = await navigator.serviceWorker.ready;
+    const response = await fetch('/sw.js', { cache: 'reload' });
+    const source = await response.text();
+    return {
+      activeScript: registration.active?.scriptURL,
+      cacheControl: response.headers.get('cache-control'),
+      cacheNames: await caches.keys(),
+      claimsClients: source.includes('clients.claim()'),
+      skipsWaiting: source.includes('skipWaiting()'),
+    };
+  });
+  expect(updateEvidence.activeScript).toMatch(/\/sw\.js$/);
+  expect(updateEvidence.cacheControl).toBe('no-cache');
+  expect(updateEvidence.cacheNames).toContain('pairplay-shell-v2');
+  expect(updateEvidence.claimsClients).toBe(true);
+  expect(updateEvidence.skipsWaiting).toBe(true);
   await context.setOffline(true);
   await page.reload({ waitUntil: 'domcontentloaded' });
   await expect(page.getByText('OFFLINE', { exact: true })).toBeVisible();

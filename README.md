@@ -78,14 +78,15 @@ or secrets are stored in this repository.
 ## Container
 
 ```sh
-docker build --build-arg BUILD_SHA="$(git rev-parse --short HEAD)" -t pairplay-motion .
+docker build --build-arg BUILD_SHA="$(git rev-parse HEAD)" -t pairplay-motion .
 docker run --rm -p 8080:8080 -v pairplay-data:/app/data pairplay-motion
 ```
 
 The image runs as the unprivileged `pairplay` user. Deployment is handled by the
 Param Factory; this repository does not manage DNS, billing registration, or
-infrastructure. `BUILD_SHA` is required for container builds (and may not be
-`container`), so `/health` always identifies the source of a released backend.
+infrastructure. Factory builds supply the full commit as `BUILD_SHA`, which is
+compiled into the server and returned by `/health`. Local builds that omit the
+argument use the explicit `dev` identity; the Dockerfile never reads `.git`.
 
 ## Known browser limits
 

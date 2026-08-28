@@ -1,84 +1,88 @@
 # PairPlay Motion — repair handoff
 
 Date: 2026-08-28
-Work order: `pairplay-motion-repair-1`
-Artifact: the existing Rust/Axum + Svelte PWA one-container web app
 
-## Release disposition — PASS
+Work order: `pairplay-motion-repair-2`
 
-This repair addresses every blocker in the independent report at
-`.factory/verification.md` for candidate
-`6c0b0f250271f166365e004decf63c1647788bb4`. The deployed repair source is
-commit `40d42ba0a21ae7debf6ba5cc6085ad1abffc2e56`; it is pushed to `main` and
-live at `https://pairplay-motion.sociobot.in`.
+Base candidate: `e138ae4e1002580b65dfd105248c10e92d2c05cd`
 
-Live proof, after the container deployment:
+Artifact: existing Rust/Axum + Svelte PWA, deployed as one container
 
-```json
-{"build":"40d42ba0a21ae7debf6ba5cc6085ad1abffc2e56","status":"ok"}
-```
+## Repair
 
-The published image is
-`sociobotregistry.azurecr.io/sf-pairplay-motion:40d42ba0a21a` at digest
-`sha256:68eda5139b30f9ee476247b16a71d36ee05af2367ad7dc3d80f8696169d5bfa0`.
+The candidate declared `ARG BUILD_SHA` without a default and then ran
+`test -n "$BUILD_SHA"`. A clean Docker build without the argument therefore
+stopped before Rust compilation. The failure is reproducible directly from the
+candidate's build step: an empty `BUILD_SHA` makes the guard exit 1.
 
-## What changed
+The server stage now declares `ARG BUILD_SHA=dev`, consumes it through
+`ENV BUILD_SHA=${BUILD_SHA}` before `cargo build --release`, and never reads
+`.git`. Rust's `option_env!("BUILD_SHA")` compiles the value into the server
+binary; the runtime image does not need repository metadata. Factory/ACR builds
+continue to supply the full 40-character source commit. A build with no argument
+has the explicit local identity `dev` rather than failing.
 
-- Container releases now require a non-empty, non-`container` `BUILD_SHA` at
-  build time. `/health` reports that compiled identifier, preventing an
-  unverifiable placeholder deployment.
-- WebSocket admission is now atomic with player insertion. A full or missing
-  room upgrades first and sends an application close frame (`4003` or `4004`),
-  which browsers expose to the controller UI. The fifth player sees “This room
-  already has four players.”; a missing room receives code recovery guidance.
-- Public `/api/rooms` and `/ws` requests have source-address and service-wide
-  token buckets. Room creation allows a burst of 12 then returns `429` with
-  `Retry-After: 5`; WebSocket upgrades allow a burst of 30. Each live socket
-  additionally limits relay input to a 30-message burst and 15 messages per
-  second. Existing message/body/capacity limits remain in place.
-- Added regression coverage for both specific controller recovery paths, room
-  rate-limit response semantics, bounded relay bursts, and the no-placeholder
-  build identity invariant.
+Focused regression coverage in `tests/container-contract.test.mjs` checks the
+default, argument consumption order, absence of `.git`/`git rev-parse`, three
+stages, non-root user, and port contract. The Rust health-route test now parses
+the response and checks that `/health.build` equals the compiled identity.
 
-## How verified
+Browser coverage was tightened to assert keyboard-generated motion frames,
+visible skip-link focus, reduced-motion timing, same-origin-only first load,
+versioned service-worker activation/update behavior, and offline reload.
 
-- Clean install: `npm ci` completed; `npm audit` reported 0 vulnerabilities.
-- `npm test`: Svelte/TypeScript check has 0 errors and 0 warnings; 5 Vitest
-  game-rule tests and 7 Rust route/unit tests passed.
-- `npm run build` passed. Initial app JS is 66.49 KB uncompressed, the
-  on-demand QR chunk is 25.84 KB, and CSS is 11.26 KB.
-- `cargo build --release` passed. A local production build compiled with the
-  exact repair SHA returned it from `/health`; 13 immediate room requests
-  returned twelve `200`s then a `429`.
-- `npm run test:e2e`: **12/12 passed** using Playwright 1.58.2 on desktop
-  Chromium and iPhone 13 Chromium (390px). It covers the original room flow,
-  touch calibration, keyboard controls, desktop/mobile layout, Axe serious and
-  critical violations, offline shell, legal routes, fifth-player recovery, and
-  missing-room recovery.
-- `verify-url.sh https://pairplay-motion.sociobot.in`: 200, 603 ms load, no
-  console/page errors, title and `lang`, one H1, main landmark, no missing
-  image alts, and no unlabelled buttons. Live GET asset responses have Brotli,
-  immutable cache control, CSP, `nosniff`, referrer policy, and sensor/payment
-  permissions policy.
-- Lighthouse mobile local production run: **99 performance / 100
-  accessibility / 100 best practices / 100 SEO**; FCP 1.1 s, LCP 2.0 s, CLS 0.
+## Verification evidence
 
-## Run or redeploy
+- `npm ci`: completed from the lockfile; 158 packages audited, 0
+  vulnerabilities.
+- `npm test`: Svelte check 0 errors/0 warnings; 5 Vitest tests, 2 container
+  contract tests, and 7 Rust tests passed.
+- `npm run build`: passed; initial JS 66,493 B, lazy QR JS 25,836 B, CSS
+  11,255 B, no fonts, mobile hero 33,204 B.
+- `npm run test:e2e`: 12/12 passed with Playwright 1.58.2 across desktop
+  Chromium and iPhone 13/390 px Chromium. Coverage includes host plus two real
+  controller pages, calibration/touch fallback, keyboard arrows and Space,
+  room capacity/missing-room recovery, mobile overflow, Axe serious/critical,
+  reduced motion, privacy/legal routes, no third-party first-load requests,
+  service-worker update policy, and usable offline reload.
+- Full supplied identity build:
+  `BUILD_SHA=e138ae4e1002580b65dfd105248c10e92d2c05cd cargo build --release` passed.
+  Started as `env -i PORT=8090 target/release/pairplay-motion`, proving that no
+  runtime variable except `PORT` is required. `/health` returned the full
+  supplied SHA and `status: ok`.
+- `/opt/fleet/lib/verify-url.sh http://127.0.0.1:8090`: HTTP 200 in 615 ms,
+  no console/page errors, correct title and `lang`, one H1, main landmark, zero
+  missing image alternatives, and zero unnamed buttons.
+- Lighthouse 12.8.2 mobile: **98 performance / 100 accessibility / 100 best
+  practices / 100 SEO**; FCP 1.1 s, LCP 2.0 s, TBT 120 ms, CLS 0.
+- Load smoke: 200 `/health` requests at 20-way concurrency returned 200/200.
+- Response checks confirm immutable caching for hashed assets plus CSP,
+  `nosniff`, strict-origin referrer policy, and restricted sensor/payment
+  permissions. The app's first browser load contacts only its own origin.
+- `cargo fmt -- --check` and `git diff --check`: passed.
+
+The clean container build/deploy uses the work-order configuration and the
+factory builder's source-tarball path:
 
 ```sh
-npm ci
-npm test
-npm run build
-cargo build --release
+/opt/fleet/lib/deploy-container.sh pairplay-motion /work/repo Dockerfile 8080
+```
+
+That invokes ACR with the full current commit in `BUILD_SHA`, `GIT_SHA`, and
+`SOURCE_COMMIT`, then configures the Container App with only `PORT=8080`.
+Acceptance requires the live `/health.build` to equal the full 40-character
+commit at deployed `main`; this was checked after the clean deployment along
+with the standard live URL verifier.
+
+For a local Docker engine, the original builder command remains:
+
+```sh
 docker build --build-arg BUILD_SHA="$(git rev-parse HEAD)" -t pairplay-motion .
 ```
 
-The factory deployment used the required build argument and the existing
-container deployment class. Persist `/app/data` for the anonymous daily counter.
+## Known physical-device gap
 
-## Remaining release smoke
-
-Physical iPhone/Safari and Android/Chrome sensor permission/calibration checks
-remain advisable on HTTPS because headless Chromium cannot generate actual
-accelerometer readings. Permission denial, absent readings, touch fallback,
-and keyboard fallback are automated and remain usable.
+Actual accelerometer permission/calibration still needs a final smoke on
+iPhone/Safari and Android/Chrome over HTTPS because headless Chromium cannot
+emit phone sensor hardware readings. Permission denial, missing readings,
+touch fallback, keyboard fallback, desktop, and mobile layouts are automated.

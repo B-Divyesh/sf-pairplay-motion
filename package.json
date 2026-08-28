@@ -7,7 +7,7 @@
     "dev": "vite --host 0.0.0.0",
     "build": "vite build",
     "preview": "vite preview --host 0.0.0.0",
-    "test": "svelte-check --tsconfig ./tsconfig.json && vitest run && cargo test",
+    "test": "svelte-check --tsconfig ./tsconfig.json && vitest run && node --test tests/container-contract.test.mjs && cargo test",
     "test:e2e": "playwright test"
   },
   "dependencies": {
