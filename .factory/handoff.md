@@ -7,6 +7,8 @@ https://pairplay-motion.sociobot.in.
 
 Implementation deployed: `c802933cb65b64e14ef576ab6a3076d8c1250b50`.
 
+Verification documentation commit: `b01221be1c8f497b0fc49701df7b0c1720452f76`.
+
 Container image: `sociobotregistry.azurecr.io/sf-pairplay-motion@sha256:9b4b88b50bfdc168039ba3aa9a51db80bc296a7642a222d7dacdfc74ef457621`.
 
 Live revision: `sf-pairplay-motion--0000012`, one replica, with the
