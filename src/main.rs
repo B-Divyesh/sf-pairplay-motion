@@ -231,7 +231,7 @@ async fn prepare_runtime_database(runtime: &Path, durable: &Path) -> anyhow::Res
         .unwrap_or(false);
     if durable_exists {
         let _ = tokio::fs::remove_file(runtime).await;
-        tokio::fs::copy(durable, runtime).await?;
+        copy_database_file(durable, runtime).await?;
     }
     Ok(())
 }
@@ -241,7 +241,18 @@ async fn mirror_database(runtime: &Path, durable: &Path) -> anyhow::Result<()> {
     // used for a POSIX-style atomic replacement. There is one replica and one
     // serialized writer, so copying a completed local SQLite file is safe for
     // this anonymous, non-critical aggregate.
-    tokio::fs::copy(runtime, durable).await?;
+    copy_database_file(runtime, durable).await?;
+    Ok(())
+}
+
+async fn copy_database_file(source: &Path, destination: &Path) -> anyhow::Result<()> {
+    // tokio::fs::copy delegates to a kernel fast-copy syscall that Azure Files
+    // rejects. A buffered stream copy uses the ordinary file operations the
+    // mounted share supports.
+    let mut reader = tokio::fs::File::open(source).await?;
+    let mut writer = tokio::fs::File::create(destination).await?;
+    tokio::io::copy(&mut reader, &mut writer).await?;
+    writer.sync_all().await?;
     Ok(())
 }
 
