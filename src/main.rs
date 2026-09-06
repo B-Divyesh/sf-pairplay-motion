@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
     str::FromStr,
     sync::Arc,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use axum::{
@@ -150,12 +150,17 @@ async fn main() -> anyhow::Result<()> {
     } else if database_url.starts_with("sqlite://data/") {
         tokio::fs::create_dir_all("data").await?;
     }
-    let options = SqliteConnectOptions::from_str(&database_url)?.create_if_missing(true);
+    let options = SqliteConnectOptions::from_str(&database_url)?
+        .create_if_missing(true)
+        .busy_timeout(Duration::from_secs(5));
     let db = SqlitePoolOptions::new()
-        .max_connections(5)
+        // A SQLite file on the product's Azure Files mount has one writer.
+        // Keeping one connection also avoids startup lock contention during a
+        // single-replica revision replacement.
+        .max_connections(1)
         .connect_with(options)
         .await?;
-    sqlx::migrate!().run(&db).await?;
+    run_migrations(&db).await?;
     let state = AppState {
         rooms: Arc::new(RwLock::new(HashMap::new())),
         db,
@@ -192,6 +197,26 @@ fn default_database_url() -> String {
             "sqlite://data/pairplay.db?mode=rwc".into()
         }
     })
+}
+
+async fn run_migrations(db: &SqlitePool) -> anyhow::Result<()> {
+    const ATTEMPTS: u32 = 20;
+    for attempt in 1..=ATTEMPTS {
+        match sqlx::migrate!().run(db).await {
+            Ok(()) => return Ok(()),
+            Err(error) if database_locked(&error) && attempt < ATTEMPTS => {
+                warn!(attempt, "SQLite startup lock; retrying migration");
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    unreachable!("the final migration attempt returns above")
+}
+
+fn database_locked(error: &sqlx::migrate::MigrateError) -> bool {
+    let message = error.to_string().to_ascii_lowercase();
+    message.contains("database is locked") || message.contains("database schema is locked")
 }
 
 fn build_router(state: AppState) -> Router {
