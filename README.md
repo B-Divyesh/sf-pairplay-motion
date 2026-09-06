@@ -40,9 +40,9 @@ The service starts with no required configuration. It uses `PORT=8080` by
 default, serves `dist/` by default, and keeps durable SQLite under `/data` when
 that mount exists; otherwise it uses `data/` beside the binary. On Azure Files, SQLite's
 live lock files are unsupported, so the service uses a local working copy and
-atomically mirrors the complete SQLite database to `/data` after each anonymous
-aggregate write. `DATABASE_URL` and `STATIC_DIR` may override those defaults
-for local development.
+copies the complete SQLite database to `/data` after each anonymous aggregate
+write. `DATABASE_URL` and `STATIC_DIR` may override those defaults for local
+development.
 
 ## Test and verify
 

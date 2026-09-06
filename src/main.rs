@@ -211,7 +211,7 @@ fn default_database_paths() -> (String, Option<PathBuf>, Option<PathBuf>) {
     }
     if Path::new("/data").is_dir() {
         // Azure Files supports ordinary file copies but not SQLite's live
-        // byte-range schema locks. Keep an active local SQLite file and mirror
+        // byte-range schema locks. Keep an active local SQLite file and copy
         // the complete database after each write to the durable product mount.
         let runtime = PathBuf::from("/tmp/pairplay-motion.db");
         let durable = PathBuf::from("/data/pairplay-motion-v3.db");
@@ -237,9 +237,11 @@ async fn prepare_runtime_database(runtime: &Path, durable: &Path) -> anyhow::Res
 }
 
 async fn mirror_database(runtime: &Path, durable: &Path) -> anyhow::Result<()> {
-    let staging = durable.with_extension("tmp");
-    tokio::fs::copy(runtime, &staging).await?;
-    tokio::fs::rename(staging, durable).await?;
+    // Azure Files accepts writes but rejects the rename-overwrite operation
+    // used for a POSIX-style atomic replacement. There is one replica and one
+    // serialized writer, so copying a completed local SQLite file is safe for
+    // this anonymous, non-critical aggregate.
+    tokio::fs::copy(runtime, durable).await?;
     Ok(())
 }
 
