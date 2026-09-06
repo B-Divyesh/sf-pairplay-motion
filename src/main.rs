@@ -160,15 +160,10 @@ async fn main() -> anyhow::Result<()> {
         .max_connections(1)
         .connect_with(options)
         .await?;
-    // Page views are the only durable data and are deliberately non-critical.
-    // Do not hold the live relay hostage while an Azure Files mount releases a
-    // transient SQLite migration lock during a revision replacement.
-    let migration_db = db.clone();
-    tokio::spawn(async move {
-        if let Err(error) = run_migrations(&migration_db).await {
-            warn!(%error, "page-view migration remains unavailable; the relay is serving without it");
-        }
-    });
+    // Rooms remain in memory, but the anonymous daily aggregate is durable.
+    // Finish its schema setup before accepting traffic so a healthy revision
+    // can persist every normal page view.
+    run_migrations(&db).await?;
     let state = AppState {
         rooms: Arc::new(RwLock::new(HashMap::new())),
         db,
@@ -200,7 +195,10 @@ async fn main() -> anyhow::Result<()> {
 fn default_database_url() -> String {
     env::var("DATABASE_URL").unwrap_or_else(|_| {
         if Path::new("/data").is_dir() {
-            "sqlite:///data/pairplay.db?mode=rwc".into()
+            // A previous failed revision left a stale lock on pairplay.db in
+            // the Azure Files share. Leave that file alone and use this fresh
+            // product-owned durable database for the current schema.
+            "sqlite:///data/pairplay-motion.db?mode=rwc".into()
         } else {
             "sqlite://data/pairplay.db?mode=rwc".into()
         }
