@@ -160,7 +160,15 @@ async fn main() -> anyhow::Result<()> {
         .max_connections(1)
         .connect_with(options)
         .await?;
-    run_migrations(&db).await?;
+    // Page views are the only durable data and are deliberately non-critical.
+    // Do not hold the live relay hostage while an Azure Files mount releases a
+    // transient SQLite migration lock during a revision replacement.
+    let migration_db = db.clone();
+    tokio::spawn(async move {
+        if let Err(error) = run_migrations(&migration_db).await {
+            warn!(%error, "page-view migration remains unavailable; the relay is serving without it");
+        }
+    });
     let state = AppState {
         rooms: Arc::new(RwLock::new(HashMap::new())),
         db,
