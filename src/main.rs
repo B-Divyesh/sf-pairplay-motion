@@ -41,6 +41,9 @@ use uuid::Uuid;
 struct AppState {
     rooms: Arc<RwLock<HashMap<String, Room>>>,
     db: SqlitePool,
+    database_write: Arc<Mutex<()>>,
+    runtime_database: Option<PathBuf>,
+    durable_database: Option<PathBuf>,
     limits: Arc<RateLimits>,
     static_dir: Arc<PathBuf>,
 }
@@ -144,9 +147,9 @@ async fn main() -> anyhow::Result<()> {
     let database_supplied = env::var_os("DATABASE_URL").is_some();
     let static_supplied = env::var_os("STATIC_DIR").is_some();
     let port_supplied = env::var_os("PORT").is_some();
-    let database_url = default_database_url();
-    if database_url.starts_with("sqlite:///data/") {
-        tokio::fs::create_dir_all("/data").await?;
+    let (database_url, runtime_database, durable_database) = default_database_paths();
+    if let (Some(runtime), Some(durable)) = (&runtime_database, &durable_database) {
+        prepare_runtime_database(runtime, durable).await?;
     } else if database_url.starts_with("sqlite://data/") {
         tokio::fs::create_dir_all("data").await?;
     }
@@ -168,9 +171,15 @@ async fn main() -> anyhow::Result<()> {
     // Finish its schema setup before accepting traffic so a healthy revision
     // can persist every normal page view.
     run_migrations(&db).await?;
+    if let (Some(runtime), Some(durable)) = (&runtime_database, &durable_database) {
+        mirror_database(runtime, durable).await?;
+    }
     let state = AppState {
         rooms: Arc::new(RwLock::new(HashMap::new())),
         db,
+        database_write: Arc::new(Mutex::new(())),
+        runtime_database,
+        durable_database,
         limits: Arc::new(RateLimits::new()),
         static_dir: Arc::new(PathBuf::from(
             env::var("STATIC_DIR").unwrap_or_else(|_| "dist".into()),
@@ -182,7 +191,7 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(address).await?;
     info!(
         %address,
-        database_config = if database_supplied { "supplied" } else if Path::new("/data").is_dir() { "generated-durable" } else { "generated-local" },
+        database_config = if database_supplied { "supplied" } else if Path::new("/data").is_dir() { "generated-durable-mirror" } else { "generated-local" },
         static_config = if static_supplied { "supplied" } else { "generated" },
         port_config = if port_supplied { "supplied" } else { "generated" },
         "PairPlay Motion listening"
@@ -196,17 +205,42 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn default_database_url() -> String {
-    env::var("DATABASE_URL").unwrap_or_else(|_| {
-        if Path::new("/data").is_dir() {
-            // Failed revisions may retain an SMB lock while the platform
-            // overlaps old and new replicas. Leave those files untouched and
-            // use the current product-owned durable database.
-            "sqlite:///data/pairplay-motion-v2.db?mode=rwc".into()
-        } else {
-            "sqlite://data/pairplay.db?mode=rwc".into()
-        }
-    })
+fn default_database_paths() -> (String, Option<PathBuf>, Option<PathBuf>) {
+    if let Ok(url) = env::var("DATABASE_URL") {
+        return (url, None, None);
+    }
+    if Path::new("/data").is_dir() {
+        // Azure Files supports ordinary file copies but not SQLite's live
+        // byte-range schema locks. Keep an active local SQLite file and mirror
+        // the complete database after each write to the durable product mount.
+        let runtime = PathBuf::from("/tmp/pairplay-motion.db");
+        let durable = PathBuf::from("/data/pairplay-motion-v3.db");
+        return (
+            format!("sqlite://{}?mode=rwc", runtime.display()),
+            Some(runtime),
+            Some(durable),
+        );
+    }
+    ("sqlite://data/pairplay.db?mode=rwc".into(), None, None)
+}
+
+async fn prepare_runtime_database(runtime: &Path, durable: &Path) -> anyhow::Result<()> {
+    let durable_exists = tokio::fs::metadata(durable)
+        .await
+        .map(|metadata| metadata.len() > 0)
+        .unwrap_or(false);
+    if durable_exists {
+        let _ = tokio::fs::remove_file(runtime).await;
+        tokio::fs::copy(durable, runtime).await?;
+    }
+    Ok(())
+}
+
+async fn mirror_database(runtime: &Path, durable: &Path) -> anyhow::Result<()> {
+    let staging = durable.with_extension("tmp");
+    tokio::fs::copy(runtime, &staging).await?;
+    tokio::fs::rename(staging, durable).await?;
+    Ok(())
 }
 
 async fn run_migrations(db: &SqlitePool) -> anyhow::Result<()> {
@@ -396,10 +430,22 @@ async fn create_room(
 }
 
 async fn page_view(State(state): State<AppState>) -> StatusCode {
+    let _write = state.database_write.lock().await;
     let result = sqlx::query("INSERT INTO page_views(day, views) VALUES(date('now'), 1) ON CONFLICT(day) DO UPDATE SET views = views + 1")
         .execute(&state.db).await;
-    if let Err(error) = result {
-        warn!(%error, "page view aggregate failed");
+    match result {
+        Ok(_) => {
+            if let (Some(runtime), Some(durable)) =
+                (&state.runtime_database, &state.durable_database)
+            {
+                if let Err(error) = mirror_database(runtime, durable).await {
+                    warn!(%error, "page view durable mirror failed");
+                }
+            }
+        }
+        Err(error) => {
+            warn!(%error, "page view aggregate failed");
+        }
     }
     StatusCode::NO_CONTENT
 }
@@ -668,10 +714,13 @@ mod tests {
             .connect_with(options)
             .await
             .unwrap();
-        sqlx::migrate!().run(&db).await.unwrap();
+        run_migrations(&db).await.unwrap();
         AppState {
             rooms: Arc::new(RwLock::new(HashMap::new())),
             db,
+            database_write: Arc::new(Mutex::new(())),
+            runtime_database: None,
+            durable_database: None,
             limits: Arc::new(RateLimits::new()),
             static_dir: Arc::new(PathBuf::from("dist")),
         }
@@ -840,5 +889,52 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(views, 1);
+    }
+
+    #[tokio::test]
+    async fn durable_mirror_restores_the_daily_count_after_a_restart() {
+        let directory = std::env::temp_dir().join(format!("pairplay-mirror-{}", Uuid::new_v4()));
+        let runtime = directory.join("runtime.db");
+        let durable = directory.join("durable.db");
+        tokio::fs::create_dir_all(&directory).await.unwrap();
+
+        let first_options =
+            SqliteConnectOptions::from_str(&format!("sqlite://{}?mode=rwc", runtime.display()))
+                .unwrap()
+                .create_if_missing(true)
+                .journal_mode(SqliteJournalMode::Delete);
+        let first = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(first_options)
+            .await
+            .unwrap();
+        run_migrations(&first).await.unwrap();
+        sqlx::query("INSERT INTO page_views(day, views) VALUES(date('now'), 1)")
+            .execute(&first)
+            .await
+            .unwrap();
+        mirror_database(&runtime, &durable).await.unwrap();
+        drop(first);
+
+        tokio::fs::remove_file(&runtime).await.unwrap();
+        prepare_runtime_database(&runtime, &durable).await.unwrap();
+        let second_options =
+            SqliteConnectOptions::from_str(&format!("sqlite://{}?mode=rwc", runtime.display()))
+                .unwrap()
+                .create_if_missing(true)
+                .journal_mode(SqliteJournalMode::Delete);
+        let second = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(second_options)
+            .await
+            .unwrap();
+        let restored: i64 = sqlx::query_scalar("SELECT views FROM page_views")
+            .fetch_one(&second)
+            .await
+            .unwrap();
+        assert_eq!(restored, 1);
+
+        drop(second);
+        tokio::fs::remove_dir_all(directory).await.unwrap();
     }
 }
