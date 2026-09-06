@@ -1,41 +1,33 @@
 # PairPlay Motion
 
-PairPlay Motion turns two to four spare phones into motion controllers for a
-shared browser screen. It is built for friends and families who want a quick
-room game without installing an app, creating accounts, or pairing Bluetooth
-hardware.
+PairPlay Motion turns spare phones into motion controllers for a shared screen.
+It is for friends and families who want a room game without an app or
+account.
 
-The free edition includes **Dead Still**. A one-time US $8 license unlocks
-**News Desk** and **Ink Runner** through the Sociobot billing service. All three
-games support real device motion and a keyboard/touch fallback.
+Start with [the sample](https://pairplay-motion.sociobot.in/demo). It opens a
+finished two-player Dead Still round and does not change real browser data.
+Choose **Start for real** to host a room and share its six-character code.
 
-## How it works
+## What is included
 
-1. Open PairPlay on the shared display and choose **Host a game**.
-2. Players scan the room QR or enter its six-character code on their phones.
-3. The host requests calibration. Each phone explicitly grants motion access,
-   or selects touch controls if its browser has no usable sensors.
-4. The host starts a 40-second round and sees live scores.
+- Dead Still is free to play.
+- The full collection has a US $8 offer.
+- The full collection uses a one-time license with no subscription.
+- Touch and keyboard controls work when motion permission is unavailable.
+- A room admits four players and refuses a fifth.
 
-Rooms and motion samples live only in server memory. SQLite holds one anonymous
-aggregate page-view count per day—no IP, identity, or sensor history. Public
-room creation and WebSocket upgrades use source and service-wide token buckets;
-each connected relay is also bounded to a 30-message burst and 15 messages per
-second. See
-[`/privacy`](https://pairplay-motion.sociobot.in/privacy) for the product policy.
+Rooms and motion are not written to the durable SQLite database. A page view
+changes only the daily aggregate count. The sample makes only same-origin
+requests and does not record a page view. Room creation is rate limited per
+forwarded client with a `Retry-After` response.
 
-## Stack
+Read [the demo guide](.factory/demo.md), [privacy](https://pairplay-motion.sociobot.in/privacy),
+and [terms](https://pairplay-motion.sociobot.in/terms) before a hosted session.
 
-- Svelte 5 + TypeScript + Vite PWA frontend
-- Rust 2021, Axum WebSockets, Tokio, and SQLx/SQLite backend
-- One non-root Alpine container serving the frontend and API on `PORT`
-- Same-origin ephemeral WebSocket relay; no third-party runtime scripts or fonts
+## Run locally
 
-The visual and motion system is documented in [`.factory/design.md`](.factory/design.md).
-
-## Local development
-
-Requirements: Node 22+, npm, Rust 1.90+, and SQLite build dependencies.
+Requirements: Node 22+, npm, Rust stable, Python 3 (for the SQLite claim
+checks), and SQLite build dependencies.
 
 ```sh
 npm ci
@@ -43,59 +35,44 @@ npm run build
 cargo run
 ```
 
-Open `http://localhost:8080`. To use physical phone sensors, serve the container
-behind HTTPS (mobile browsers generally block sensors on insecure origins).
-For split-device development, run the backend and Vite separately:
-
-```sh
-cargo run
-npm run dev
-```
-
-Vite proxies `/api` and `/ws` to port 8080. Configuration is environment-only:
-
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `PORT` | `8080` | HTTP/WebSocket listener |
-| `DATABASE_URL` | `sqlite://data/pairplay.db?mode=rwc` | Aggregate counter database |
-| `STATIC_DIR` | `dist` | Built frontend directory |
-| `RUST_LOG` | application defaults | Structured log filter |
-| `VITE_BILLING_BASE` | `https://api.sociobot.in` | Build-time Sociobot billing origin |
+Open `http://localhost:8080`. Use HTTPS when checking phone motion permission.
+The service starts with no required configuration. It uses `PORT=8080` by
+default, serves `dist/` by default, and writes SQLite to `/data` when that mount
+exists; otherwise it uses `data/` beside the binary. `DATABASE_URL` and
+`STATIC_DIR` may override those defaults for local development.
 
 ## Test and verify
 
 ```sh
-npm test          # Vitest game rules + Rust route/unit tests
-npm run build     # production frontend -> dist/
-npm run test:e2e  # Chromium desktop/mobile, Axe, real multi-page WebSockets
-npm audit
+npm test
+npm run build
+npm run test:e2e
+npm run test:claims
+npm audit --audit-level=low
+cargo clippy --all-targets -- -D warnings
+cargo fmt -- --check
 ```
 
-The Playwright version is pinned to match the factory-provided browsers. E2E
-tests start the built Axum app automatically. No payment-provider card details
-or secrets are stored in this repository.
+Every public claim has a clean sample-sandbox command in
+[`.factory/claims.json`](.factory/claims.json). Run each listed command after
+`npm ci`; the claim suite starts the built frontend and Axum service itself.
 
-## Container
+## Deploy
 
-```sh
-docker build --build-arg BUILD_SHA="$(git rev-parse HEAD)" -t pairplay-motion .
-docker run --rm -p 8080:8080 -v pairplay-data:/app/data pairplay-motion
-```
+The factory deploys the root Dockerfile as one non-root container. It mounts
+the product Azure Files share at `/data` and keeps the service at one replica,
+because the live WebSocket relay is process-local. The factory supplies
+`BUILD_SHA`; `/health` returns it with `status: ok`. Do not configure payment
+credentials in this repository. The hosted Sociobot billing endpoint is the
+only checkout integration.
 
-The image runs as the unprivileged `pairplay` user. Deployment is handled by the
-Param Factory; this repository does not manage DNS, billing registration, or
-infrastructure. Factory builds supply the full commit as `BUILD_SHA`, which is
-compiled into the server and returned by `/health`. Local builds that omit the
-argument use the explicit `dev` identity; the Dockerfile never reads `.git`.
+## Browser limits
 
-## Known browser limits
-
-- iOS requires an explicit user gesture before its motion permission prompt.
-- Sensor ranges and reporting rates differ on older phones.
-- Controllers need a stable network route to the deployed host. The accessible
-  touch/keyboard controls are available whenever motion is denied or absent.
+iOS asks for motion permission from a user action. Older phones can send fewer
+sensor readings. Touch controls remain available when permission is denied or
+readings do not arrive.
 
 ## License
 
-MIT. Generated hero artwork is original to this product; its prompt and
-provenance are stored in `assets/src/`.
+MIT. The generated hero illustration is original to this product. Its source
+prompt and provenance are in [`assets/src/hero-broadsheet.json`](assets/src/hero-broadsheet.json).

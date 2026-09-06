@@ -1,0 +1,100 @@
+[
+  {
+    "id": "no-app",
+    "claim": "Sample games run in the browser without an app download.",
+    "where": "landing facts, README",
+    "test": "npm run test:claims -- --grep @claim:no-app",
+    "sandbox": "fresh browser context opens /demo and checks the populated sample without an app-store link"
+  },
+  {
+    "id": "no-account",
+    "claim": "The sample opens without creating an account.",
+    "where": "landing facts, README",
+    "test": "npm run test:claims -- --grep @claim:no-account",
+    "sandbox": "fresh browser context opens /demo and checks it has no account form"
+  },
+  {
+    "id": "demo-sandbox",
+    "claim": "The sample is populated, can be reset, and does not change real browser data.",
+    "where": "landing action, demo banner, README",
+    "test": "npm run test:claims -- --grep @claim:demo-sandbox",
+    "sandbox": "fresh browser context seeds a real-data key, opens /demo, changes and resets sample output, then starts for real"
+  },
+  {
+    "id": "sensor-retention",
+    "claim": "Motion controls do not write samples to browser storage.",
+    "where": "controller permission screen",
+    "test": "npm run test:claims -- --grep @claim:sensor-retention",
+    "sandbox": "fresh sample-to-real room, two touch controllers, and a storage-key inspection after sending motion"
+  },
+  {
+    "id": "two-to-four-phone-support",
+    "claim": "A room admits four players and refuses a fifth.",
+    "where": "host room screen, README",
+    "test": "npm run test:claims -- --grep @claim:two-to-four-phone-support",
+    "sandbox": "fresh sample-to-real room joins four controller contexts and checks the fifth-player recovery message"
+  },
+  {
+    "id": "free-dead-still",
+    "claim": "Dead Still is free to play.",
+    "where": "games list, paid offer, README",
+    "test": "npm run test:claims -- --grep @claim:free-dead-still",
+    "sandbox": "fresh /demo starts and completes a Dead Still round without a license"
+  },
+  {
+    "id": "price",
+    "claim": "The full collection has a US $8 offer.",
+    "where": "paid offer, terms, README",
+    "test": "npm run test:claims -- --grep @claim:price",
+    "sandbox": "fresh /demo then Start for real checks the stated price and product checkout path"
+  },
+  {
+    "id": "one-time-license",
+    "claim": "The full collection uses a one-time license with no subscription.",
+    "where": "paid offer, terms, README",
+    "test": "npm run test:claims -- --grep @claim:one-time-license",
+    "sandbox": "fresh /demo then Start for real checks the license terms next to the offer"
+  },
+  {
+    "id": "license-storage",
+    "claim": "A license token and its latest check stay only in your browser.",
+    "where": "privacy, paid unlock",
+    "test": "npm run test:claims -- --grep @claim:license-storage",
+    "sandbox": "fresh /demo then Start for real opens a returned sample token and checks local browser storage and the cleaned URL"
+  },
+  {
+    "id": "touch-keyboard-fallback",
+    "claim": "Touch and keyboard controls work when motion permission is unavailable.",
+    "where": "how it works, controller screen, README",
+    "test": "npm run test:claims -- --grep @claim:touch-keyboard-fallback",
+    "sandbox": "fresh sample-to-real room calibrates two touch controllers, sends Arrow and Space input, and starts a live round"
+  },
+  {
+    "id": "server-memory",
+    "claim": "Rooms and motion are not written to the durable SQLite database.",
+    "where": "privacy, README",
+    "test": "npm run test:claims -- --grep @claim:server-memory",
+    "sandbox": "fresh /demo records a page view and inspects the running service SQLite schema for only the aggregate table"
+  },
+  {
+    "id": "aggregate-page-count",
+    "claim": "A page view changes only the daily aggregate count.",
+    "where": "privacy, README",
+    "test": "npm run test:claims -- --grep @claim:aggregate-page-count",
+    "sandbox": "fresh /demo posts one page view and checks the running service SQLite total increments by one"
+  },
+  {
+    "id": "no-trackers",
+    "claim": "The sample makes only same-origin requests and does not record a page view.",
+    "where": "privacy, README",
+    "test": "npm run test:claims -- --grep @claim:no-trackers",
+    "sandbox": "fresh browser context records every request while loading /demo"
+  },
+  {
+    "id": "rate-limits",
+    "claim": "Room creation is rate limited per forwarded client with a Retry-After response.",
+    "where": "README",
+    "test": "npm run test:claims -- --grep @claim:rate-limits",
+    "sandbox": "fresh /demo sends room requests with one forwarded address until 429, then verifies a different address remains allowed"
+  }
+]

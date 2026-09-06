@@ -1,4 +1,4 @@
-const CACHE = 'pairplay-shell-v2';
+const CACHE = 'pairplay-shell-v3';
 const SHELL = ['/manifest.webmanifest', '/icon.svg', '/assets/hero-broadsheet-720.webp'];
 self.addEventListener('install', (event) => event.waitUntil((async () => {
   const cache = await caches.open(CACHE);

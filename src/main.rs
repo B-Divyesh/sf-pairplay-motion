@@ -1,5 +1,11 @@
 use std::{
-    collections::HashMap, env, net::SocketAddr, path::Path, str::FromStr, sync::Arc, time::Instant,
+    collections::HashMap,
+    env,
+    net::{IpAddr, SocketAddr},
+    path::{Path, PathBuf},
+    str::FromStr,
+    sync::Arc,
+    time::Instant,
 };
 
 use axum::{
@@ -8,7 +14,7 @@ use axum::{
         ws::{CloseFrame, Message, WebSocket},
         ConnectInfo, DefaultBodyLimit, Query, State, WebSocketUpgrade,
     },
-    http::{header, HeaderValue, Request, StatusCode},
+    http::{header, HeaderMap, HeaderValue, Request, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -36,6 +42,7 @@ struct AppState {
     rooms: Arc<RwLock<HashMap<String, Room>>>,
     db: SqlitePool,
     limits: Arc<RateLimits>,
+    static_dir: Arc<PathBuf>,
 }
 
 /// A small, in-process token bucket is enough for this single-container relay.
@@ -134,9 +141,13 @@ async fn main() -> anyhow::Result<()> {
         .json()
         .init();
 
-    let database_url =
-        env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite://data/pairplay.db?mode=rwc".into());
-    if database_url.starts_with("sqlite://data/") {
+    let database_supplied = env::var_os("DATABASE_URL").is_some();
+    let static_supplied = env::var_os("STATIC_DIR").is_some();
+    let port_supplied = env::var_os("PORT").is_some();
+    let database_url = default_database_url();
+    if database_url.starts_with("sqlite:///data/") {
+        tokio::fs::create_dir_all("/data").await?;
+    } else if database_url.starts_with("sqlite://data/") {
         tokio::fs::create_dir_all("data").await?;
     }
     let options = SqliteConnectOptions::from_str(&database_url)?.create_if_missing(true);
@@ -149,13 +160,21 @@ async fn main() -> anyhow::Result<()> {
         rooms: Arc::new(RwLock::new(HashMap::new())),
         db,
         limits: Arc::new(RateLimits::new()),
+        static_dir: Arc::new(PathBuf::from(
+            env::var("STATIC_DIR").unwrap_or_else(|_| "dist".into()),
+        )),
     };
-    let static_dir = env::var("STATIC_DIR").unwrap_or_else(|_| "dist".into());
-    let app = build_router(state, &static_dir);
+    let app = build_router(state);
     let port: u16 = env::var("PORT").unwrap_or_else(|_| "8080".into()).parse()?;
     let address = SocketAddr::from(([0, 0, 0, 0], port));
     let listener = tokio::net::TcpListener::bind(address).await?;
-    info!(%address, "PairPlay Motion listening");
+    info!(
+        %address,
+        database_config = if database_supplied { "supplied" } else if Path::new("/data").is_dir() { "generated-durable" } else { "generated-local" },
+        static_config = if static_supplied { "supplied" } else { "generated" },
+        port_config = if port_supplied { "supplied" } else { "generated" },
+        "PairPlay Motion listening"
+    );
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
@@ -165,13 +184,28 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn build_router(state: AppState, static_dir: &str) -> Router {
-    let root = Path::new(static_dir);
+fn default_database_url() -> String {
+    env::var("DATABASE_URL").unwrap_or_else(|_| {
+        if Path::new("/data").is_dir() {
+            "sqlite:///data/pairplay.db?mode=rwc".into()
+        } else {
+            "sqlite://data/pairplay.db?mode=rwc".into()
+        }
+    })
+}
+
+fn build_router(state: AppState) -> Router {
+    let root = state.static_dir.as_ref();
     Router::new()
         .route("/health", get(health))
         .route("/api/rooms", post(create_room))
         .route("/api/page-view", post(page_view))
         .route("/ws", get(ws_handler))
+        .route("/", get(serve_spa))
+        .route("/demo", get(serve_spa))
+        .route("/privacy", get(serve_spa))
+        .route("/terms", get(serve_spa))
+        .route("/404", get(not_found_spa))
         .route_service("/sw.js", ServeFile::new(root.join("sw.js")))
         .route_service("/icon.svg", ServeFile::new(root.join("icon.svg")))
         .route_service(
@@ -181,7 +215,7 @@ fn build_router(state: AppState, static_dir: &str) -> Router {
         .route_service("/robots.txt", ServeFile::new(root.join("robots.txt")))
         .route_service("/sitemap.xml", ServeFile::new(root.join("sitemap.xml")))
         .nest_service("/assets", ServeDir::new(root.join("assets")))
-        .fallback_service(ServeFile::new(root.join("index.html")))
+        .fallback(not_found_spa)
         .layer(DefaultBodyLimit::max(8 * 1024))
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -191,6 +225,26 @@ fn build_router(state: AppState, static_dir: &str) -> Router {
         .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http())
         .with_state(state)
+}
+
+async fn serve_spa(State(state): State<AppState>) -> Response {
+    match tokio::fs::read(state.static_dir.join("index.html")).await {
+        Ok(body) => ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], body).into_response(),
+        Err(error) => {
+            warn!(%error, "frontend entry file unavailable");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "The game screen is unavailable.",
+            )
+                .into_response()
+        }
+    }
+}
+
+async fn not_found_spa(State(state): State<AppState>) -> Response {
+    let mut response = serve_spa(State(state)).await;
+    *response.status_mut() = StatusCode::NOT_FOUND;
+    response
 }
 
 async fn health() -> Json<Value> {
@@ -213,11 +267,14 @@ async fn public_rate_limit(
         "/ws" => ("websocket", 30, 0.5, 300, 5.0),
         _ => return next.run(request).await,
     };
-    let source = request
-        .extensions()
-        .get::<ConnectInfo<SocketAddr>>()
-        .map(|address| address.0.ip().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
+    let source = forwarded_source(
+        request.headers(),
+        request
+            .extensions()
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|address| address.0.ip().to_string())
+            .unwrap_or_else(|| "unknown".to_string()),
+    );
     let source_allowed = state
         .limits
         .allow(
@@ -250,6 +307,19 @@ async fn public_rate_limit(
         .headers_mut()
         .insert(header::RETRY_AFTER, HeaderValue::from_static("5"));
     response
+}
+
+/// Azure ingress writes the original client as the first X-Forwarded-For hop.
+/// Invalid input is ignored so a malformed header cannot create unbounded keys.
+fn forwarded_source(headers: &HeaderMap, fallback: String) -> String {
+    headers
+        .get("x-forwarded-for")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(',').next())
+        .map(str::trim)
+        .and_then(|value| value.parse::<IpAddr>().ok())
+        .map(|address| address.to_string())
+        .unwrap_or(fallback)
 }
 
 async fn create_room(
@@ -561,6 +631,7 @@ mod tests {
             rooms: Arc::new(RwLock::new(HashMap::new())),
             db,
             limits: Arc::new(RateLimits::new()),
+            static_dir: Arc::new(PathBuf::from("dist")),
         }
     }
 
@@ -583,7 +654,7 @@ mod tests {
 
     #[tokio::test]
     async fn health_route_has_an_explicit_non_placeholder_identity() {
-        let app = build_router(test_state().await, "dist");
+        let app = build_router(test_state().await);
         let response = app
             .oneshot(
                 Request::builder()
@@ -606,7 +677,7 @@ mod tests {
     #[tokio::test]
     async fn room_route_creates_unique_room() {
         let state = test_state().await;
-        let app = build_router(state.clone(), "dist");
+        let app = build_router(state.clone());
         let response = app
             .oneshot(
                 Request::builder()
@@ -624,7 +695,7 @@ mod tests {
 
     #[tokio::test]
     async fn room_creation_is_rate_limited_with_a_retry_hint() {
-        let app = build_router(test_state().await, "dist");
+        let app = build_router(test_state().await);
         for _ in 0..12 {
             let response = app
                 .clone()
@@ -653,6 +724,53 @@ mod tests {
         assert_eq!(response.headers().get(header::RETRY_AFTER).unwrap(), "5");
     }
 
+    #[tokio::test]
+    async fn room_limit_uses_the_first_forwarded_client_and_keeps_clients_isolated() {
+        let app = build_router(test_state().await);
+        for _ in 0..12 {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/rooms")
+                        .header("x-forwarded-for", "198.51.100.44, 10.0.0.2")
+                        .body(Body::from("{}"))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+        let limited = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/rooms")
+                    .header("x-forwarded-for", "198.51.100.44, 10.0.0.2")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(limited.headers().get(header::RETRY_AFTER).unwrap(), "5");
+
+        let other_client = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/rooms")
+                    .header("x-forwarded-for", "203.0.113.18")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(other_client.status(), StatusCode::OK);
+    }
+
     #[test]
     fn websocket_relay_bucket_has_a_bounded_burst() {
         let mut bucket = TokenBucket::fresh(30);
@@ -663,7 +781,7 @@ mod tests {
     #[tokio::test]
     async fn page_view_stores_only_daily_count() {
         let state = test_state().await;
-        let app = build_router(state.clone(), "dist");
+        let app = build_router(state.clone());
         let response = app
             .oneshot(
                 Request::builder()

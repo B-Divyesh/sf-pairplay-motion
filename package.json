@@ -8,7 +8,8 @@
     "build": "vite build",
     "preview": "vite preview --host 0.0.0.0",
     "test": "svelte-check --tsconfig ./tsconfig.json && vitest run && node --test tests/container-contract.test.mjs && cargo test",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test tests/e2e/pairplay.spec.ts",
+    "test:claims": "playwright test tests/e2e/claims.spec.ts --project=desktop"
   },
   "dependencies": {
     "qrcode": "1.5.4",

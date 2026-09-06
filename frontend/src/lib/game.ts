@@ -18,9 +18,9 @@ export interface PlayerRound {
 }
 
 export const gameDetails: Record<GameId, { name: string; kicker: string; description: string; paid: boolean }> = {
-  freeze: { name: 'Dead Still', kicker: 'The stop-press game', description: 'Move on MOVE. Lock the phone still on FREEZE.', paid: false },
-  tilt: { name: 'News Desk', kicker: 'Follow the headline', description: 'Tilt in the printed direction before the edition closes.', paid: true },
-  shake: { name: 'Ink Runner', kicker: 'Race the presses', description: 'Shake hard on GO. Hold the presses on REST.', paid: true },
+  freeze: { name: 'Dead Still', kicker: 'Free game', description: 'Move on MOVE. Hold still on FREEZE.', paid: false },
+  tilt: { name: 'News Desk', kicker: 'Full edition', description: 'Tilt in the direction shown before time runs out.', paid: true },
+  shake: { name: 'Ink Runner', kicker: 'Full edition', description: 'Shake on GO. Hold still on REST.', paid: true },
 };
 
 export const initialCue = (game: GameId): Cue => game === 'freeze' ? 'MOVE' : game === 'tilt' ? 'LEFT' : 'REST';

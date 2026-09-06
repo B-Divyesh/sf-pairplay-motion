@@ -94,3 +94,8 @@ generated for PairPlay Motion with the Param Factory image deployment on
 2026-08-28. The exact prompt and generation metadata live beside the source in
 `assets/src/hero-broadsheet.json`. Generated imagery is original and is
 disclosed in the product footer.
+
+`pairplay-social-1200x630.webp` and `apple-touch-icon.png` are cropped,
+optimized derivatives of that same original hero source. They were made locally
+on 2026-09-06 for social previews and installed-app recognition; no additional
+third-party art or font is used.

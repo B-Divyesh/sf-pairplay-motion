@@ -1,0 +1,11 @@
+{
+  "slug": "pairplay-motion",
+  "name": "PairPlay Motion full edition",
+  "price_minor": 800,
+  "currency": "USD",
+  "price_type": "one_time_price",
+  "return_url": "https://pairplay-motion.sociobot.in/",
+  "price_evidence": "The product's paid-offer and terms copy state US $8 once. On 2026-09-06, GET https://api.sociobot.in/api/v1/products/pairplay-motion/checkout returned HTTP 404 with status 'enabled factory product', so billing registration is unavailable and no checkout price was independently confirmed.",
+  "paid_features": ["News Desk", "Ink Runner"],
+  "license_validation_path": "https://api.sociobot.in/api/v1/products/pairplay-motion/verify?license=<token>"
+}

@@ -9,8 +9,10 @@ test('landing page is accessible and responsive', async ({ page }, testInfo) => 
   });
   await page.goto('/');
   await page.waitForLoadState('networkidle');
-  await expect(page).toHaveTitle(/PairPlay Motion/);
+  await expect(page).toHaveTitle('PairPlay Motion — phone motion games');
   await expect(page.getByRole('heading', { level: 1 })).toHaveCount(1);
+  await expect(page.getByRole('heading', { level: 1, name: 'Turn phones into motion controllers' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Try it with sample data' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Host a game' })).toBeVisible();
   await page.keyboard.press('Tab');
   await expect(page.getByRole('link', { name: 'Skip to main content' })).toBeFocused();
@@ -48,10 +50,10 @@ test('two players can join, calibrate with fallback, and start a round', async (
     await expect(controller.getByText('Connected. Look at the host screen.')).toBeVisible();
   }
   await expect(page.getByText('2 of 4')).toBeVisible();
-  await page.getByRole('button', { name: 'Calibrate all phones' }).click();
+  await page.getByRole('button', { name: 'Calibrate phones' }).click();
   await first.getByRole('button', { name: 'Use touch controls instead' }).click();
   await second.getByRole('button', { name: 'Use touch controls instead' }).click();
-  await expect(page.getByText('✓ Calibrated')).toHaveCount(2);
+  await expect(page.getByText('Calibrated', { exact: true })).toHaveCount(2);
   keyboardFrames.length = 0;
   await first.keyboard.press('ArrowLeft');
   await first.keyboard.press('Space');
@@ -92,9 +94,31 @@ test('a controller gets a specific recovery message for a missing room', async (
 
 test('privacy and terms have real routes', async ({ page }) => {
   await page.goto('/privacy');
-  await expect(page.getByRole('heading', { name: 'Privacy, in plain language' })).toBeVisible();
+  await expect(page).toHaveTitle('Privacy — PairPlay Motion');
+  await expect(page.getByRole('heading', { level: 1, name: 'Privacy' })).toBeVisible();
   await page.goto('/terms');
-  await expect(page.getByRole('heading', { name: 'Terms of play' })).toBeVisible();
+  await expect(page).toHaveTitle('Terms — PairPlay Motion');
+  await expect(page.getByRole('heading', { level: 1, name: 'Terms' })).toBeVisible();
+});
+
+test('demo and unknown routes have their own titles and a usable 404 page', async ({ page }) => {
+  await page.goto('/demo');
+  await expect(page).toHaveTitle('Demo — PairPlay Motion');
+  await expect(page.getByText('Demo — sample data, nothing is saved')).toBeVisible();
+  const response = await page.goto('/missing-page');
+  expect(response?.status()).toBe(404);
+  await expect(page).toHaveTitle('Page not found — PairPlay Motion');
+  await expect(page.getByRole('heading', { level: 1, name: 'Page not found' })).toBeVisible();
+  await page.getByRole('button', { name: 'Go to the home page' }).click();
+  await expect(page.getByRole('heading', { level: 1, name: 'Turn phones into motion controllers' })).toBeVisible();
+});
+
+test('invalid join input is announced once', async ({ page }) => {
+  await page.goto('/?join=X');
+  await page.getByLabel('Scoreboard name').fill('Ada');
+  await page.getByRole('button', { name: 'Join room' }).click();
+  await expect(page.getByRole('alert')).toHaveCount(1);
+  await expect(page.getByRole('alert')).toContainText('Enter the six-character room code.');
 });
 
 test('installed shell reloads with an offline state', async ({ page, context }) => {
@@ -115,7 +139,7 @@ test('installed shell reloads with an offline state', async ({ page, context }) 
   });
   expect(updateEvidence.activeScript).toMatch(/\/sw\.js$/);
   expect(updateEvidence.cacheControl).toBe('no-cache');
-  expect(updateEvidence.cacheNames).toContain('pairplay-shell-v2');
+  expect(updateEvidence.cacheNames).toContain('pairplay-shell-v3');
   expect(updateEvidence.claimsClients).toBe(true);
   expect(updateEvidence.skipsWaiting).toBe(true);
   await context.setOffline(true);

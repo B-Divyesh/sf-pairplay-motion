@@ -1,13 +1,20 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { checkoutUrl, captureLicense, cachedUnlock, saveLicense, verifyLicense } from './lib/license';
   import { cueEvery, gameDetails, initialCue, nextCue, scoreSample, type Cue, type GameId, type MotionSample, type PlayerRound } from './lib/game';
 
-  type Screen = 'home' | 'host' | 'controller' | 'privacy' | 'terms';
+  type Screen = 'home' | 'host' | 'controller' | 'privacy' | 'terms' | 'notFound';
   type Player = { id: string; name: string; calibrated: boolean; connected: boolean };
   type Wire = Record<string, unknown> & { type?: string };
 
-  let screen: Screen = location.pathname === '/privacy' ? 'privacy' : location.pathname === '/terms' ? 'terms' : 'home';
+  const demoStorageKey = 'demo:pairplay-motion';
+  const samplePlayers: Player[] = [
+    { id: 'sample-ada', name: 'Ada', calibrated: true, connected: true },
+    { id: 'sample-lin', name: 'Lin', calibrated: true, connected: true },
+  ];
+  const screenFromPath = (path: string): Screen => path === '/' || path === '/demo' ? 'home' : path === '/privacy' ? 'privacy' : path === '/terms' ? 'terms' : 'notFound';
+  let isDemo = location.pathname === '/demo' || new URLSearchParams(location.search).get('demo') === '1';
+  let screen: Screen = isDemo ? 'host' : screenFromPath(location.pathname);
   let online = navigator.onLine;
   let busy = false;
   let error = '';
@@ -50,29 +57,108 @@
   const wsBase = () => `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws`;
   const send = (message: Wire) => socket?.readyState === WebSocket.OPEN && socket.send(JSON.stringify(message));
 
+  function pageTitle() {
+    if (isDemo) return 'Demo — PairPlay Motion';
+    if (screen === 'privacy') return 'Privacy — PairPlay Motion';
+    if (screen === 'terms') return 'Terms — PairPlay Motion';
+    if (screen === 'notFound') return 'Page not found — PairPlay Motion';
+    if (screen === 'host') return 'Host a room — PairPlay Motion';
+    if (screen === 'controller') return 'Phone controller — PairPlay Motion';
+    return 'PairPlay Motion — phone motion games';
+  }
+
+  async function announceRoute() {
+    document.title = pageTitle();
+    await tick();
+    document.querySelector<HTMLElement>('main h1')?.focus();
+  }
+
+  function loadDemoState() {
+    isDemo = true;
+    screen = 'host';
+    roomCode = 'SAMPLE';
+    hostToken = '';
+    socket?.close(); socket = null;
+    connection = 'live';
+    players = samplePlayers.map((player) => ({ ...player }));
+    selectedGame = 'freeze';
+    phase = 'results';
+    cue = 'FREEZE';
+    timeLeft = 0;
+    roundPlayers = {
+      'sample-ada': { id: 'sample-ada', score: 34, hitCue: false, lastShakeAt: 0 },
+      'sample-lin': { id: 'sample-lin', score: 28, hitCue: false, lastShakeAt: 0 },
+    };
+    sensorMode = 'standby';
+    controllerCue = '';
+    error = '';
+    notice = 'Sample room loaded. Nothing is saved.';
+    sessionStorage.setItem(demoStorageKey, 'loaded');
+    document.title = pageTitle();
+  }
+
+  function startDemo() {
+    history.pushState({}, '', '/demo');
+    loadDemoState();
+    void announceRoute();
+  }
+
+  function resetDemo() {
+    loadDemoState();
+  }
+
+  function startForReal() {
+    stopRound();
+    socket?.close(); socket = null;
+    sessionStorage.removeItem(demoStorageKey);
+    isDemo = false;
+    screen = 'home';
+    roomCode = '';
+    players = [];
+    selectedGame = null;
+    phase = 'lobby';
+    roundPlayers = {};
+    connection = 'idle';
+    notice = '';
+    error = '';
+    history.pushState({}, '', '/');
+    void announceRoute();
+  }
+
   function navigate(next: Screen) {
+    if (isDemo) { startForReal(); if (next === 'home') return; }
     stopRound();
     socket?.close();
     socket = null;
     screen = next;
     error = '';
     notice = '';
-    const path = next === 'privacy' ? '/privacy' : next === 'terms' ? '/terms' : '/';
+    const path = next === 'privacy' ? '/privacy' : next === 'terms' ? '/terms' : next === 'notFound' ? '/404' : '/';
     history.pushState({}, '', path);
     window.scrollTo({ top: 0, behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+    void announceRoute();
   }
 
   onMount(() => {
-    captureLicense();
-    premium = cachedUnlock();
-    verifyLicense().then((result) => { premium = result.unlocked; licenseNotice = result.notice; });
-    if (!sessionStorage.getItem('pairplay-view')) {
-      fetch('/api/page-view', { method: 'POST' }).catch(() => undefined);
-      sessionStorage.setItem('pairplay-view', '1');
+    if (isDemo) {
+      loadDemoState();
+    } else {
+      captureLicense();
+      premium = cachedUnlock();
+      verifyLicense().then((result) => { premium = result.unlocked; licenseNotice = result.notice; });
+      if (!sessionStorage.getItem('pairplay-view')) {
+        fetch('/api/page-view', { method: 'POST' }).catch(() => undefined);
+        sessionStorage.setItem('pairplay-view', '1');
+      }
     }
+    document.title = pageTitle();
     const onOnline = () => { online = true; };
     const onOffline = () => { online = false; };
-    const onPop = () => { screen = location.pathname === '/privacy' ? 'privacy' : location.pathname === '/terms' ? 'terms' : 'home'; };
+    const onPop = () => {
+      const nextDemo = location.pathname === '/demo' || new URLSearchParams(location.search).get('demo') === '1';
+      if (nextDemo) loadDemoState();
+      else { isDemo = false; screen = screenFromPath(location.pathname); void announceRoute(); }
+    };
     addEventListener('online', onOnline); addEventListener('offline', onOffline); addEventListener('popstate', onPop);
     return () => {
       removeEventListener('online', onOnline); removeEventListener('offline', onOffline); removeEventListener('popstate', onPop);
@@ -87,7 +173,7 @@
       const response = await fetch('/api/rooms', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
       if (!response.ok) throw new Error('Room service did not answer');
       const data = await response.json() as { code: string; host_token: string };
-      roomCode = data.code; hostToken = data.host_token; screen = 'host';
+      roomCode = data.code; hostToken = data.host_token; screen = 'host'; void announceRoute();
       connectHost();
       setTimeout(async () => {
         const QRCode = (await import('qrcode')).default;
@@ -98,13 +184,15 @@
   }
 
   function connectHost() {
+    if (isDemo) { connection = 'live'; return; }
     connection = 'connecting';
     socket?.close();
-    socket = new WebSocket(`${wsBase()}?room=${encodeURIComponent(roomCode)}&role=host&token=${encodeURIComponent(hostToken)}`);
-    socket.onopen = () => { connection = 'live'; };
-    socket.onclose = () => { connection = 'lost'; if (phase === 'round') stopRound(); };
-    socket.onerror = () => { error = 'The room connection failed. Reconnect without creating a new code.'; };
-    socket.onmessage = (event) => handleHostMessage(JSON.parse(event.data));
+    const nextSocket = new WebSocket(`${wsBase()}?room=${encodeURIComponent(roomCode)}&role=host&token=${encodeURIComponent(hostToken)}`);
+    socket = nextSocket;
+    nextSocket.onopen = () => { if (socket === nextSocket) connection = 'live'; };
+    nextSocket.onclose = () => { if (socket === nextSocket) { connection = 'lost'; if (phase === 'round') stopRound(); } };
+    nextSocket.onerror = () => { if (socket === nextSocket) error = 'The room connection failed. Reconnect without creating a new code.'; };
+    nextSocket.onmessage = (event) => handleHostMessage(JSON.parse(event.data));
   }
 
   function handleHostMessage(message: Wire) {
@@ -146,18 +234,20 @@
     if (roomCode.length !== 6) { error = 'Enter the six-character room code.'; return; }
     if (playerName.length < 1) { error = 'Enter a name for the scoreboard.'; return; }
     if (!online) { error = 'You are offline. Reconnect before joining.'; return; }
-    error = ''; screen = 'controller'; connection = 'connecting';
-    socket = new WebSocket(`${wsBase()}?room=${encodeURIComponent(roomCode)}&role=controller&name=${encodeURIComponent(playerName)}`);
-    socket.onopen = () => { connection = 'live'; controllerMessage = 'Connected. Look at the host screen.'; };
-    socket.onclose = (event) => {
+    error = ''; screen = 'controller'; connection = 'connecting'; void announceRoute();
+    const nextSocket = new WebSocket(`${wsBase()}?room=${encodeURIComponent(roomCode)}&role=controller&name=${encodeURIComponent(playerName)}`);
+    socket = nextSocket;
+    nextSocket.onopen = () => { if (socket === nextSocket) { connection = 'live'; controllerMessage = 'Connected. Look at the host screen.'; } };
+    nextSocket.onclose = (event) => {
+      if (socket !== nextSocket) return;
       connection = 'lost';
       controllerMessage = event.code === 4004 ? 'Room not found. Check the code with the host.' : event.code === 4003 ? 'This room already has four players.' : 'Connection lost. Rejoin when Wi-Fi returns.';
     };
     // Browsers intentionally hide the HTTP status of a failed WebSocket
     // handshake. The server upgrades then closes with an application code so
     // the recovery message below is reliable for full and missing rooms.
-    socket.onerror = () => undefined;
-    socket.onmessage = (event) => handleControllerMessage(JSON.parse(event.data));
+    nextSocket.onerror = () => undefined;
+    nextSocket.onmessage = (event) => handleControllerMessage(JSON.parse(event.data));
   }
 
   function handleControllerMessage(message: Wire) {
@@ -179,7 +269,7 @@
     if (value === 'FREEZE') return 'Freeze. Hold perfectly still.';
     if (value === 'MOVE') return 'Move. Get ready to stop.';
     if (value === 'GO') return 'Go. Shake the phone.';
-    if (value === 'REST') return 'Rest. Hold the presses.';
+    if (value === 'REST') return 'Rest. Hold still.';
     return `Tilt ${value.toLowerCase()}.`;
   }
 
@@ -312,73 +402,79 @@
 
 <header class="masthead">
   <a class="brand" href="/" onclick={(event) => { event.preventDefault(); navigate('home'); }}>
-    <span class="edition">The room-play edition</span>
-    <h1>PairPlay Motion</h1>
+    <span class="edition">Motion room games</span>
+    <span class="brand-name">PairPlay Motion</span>
   </a>
   <nav aria-label="Primary navigation">
+    <a href="/demo" onclick={(event) => { event.preventDefault(); startDemo(); }}>Demo</a>
     <a href="/privacy" onclick={(event) => { event.preventDefault(); navigate('privacy'); }}>Privacy</a>
     <a href="/terms" onclick={(event) => { event.preventDefault(); navigate('terms'); }}>Terms</a>
   </nav>
 </header>
 
 {#if !online}
-  <div class="offline" role="status"><strong>OFFLINE</strong> The rules are readable, but rooms need Wi-Fi. Reconnect to host or join.</div>
+  <div class="offline" role="status"><strong>OFFLINE</strong> Rooms need a connection. Reconnect to host or join.</div>
+{/if}
+{#if isDemo}
+  <aside class="demo-banner" aria-label="Sample game mode"><strong>Demo — sample data, nothing is saved</strong><span><button onclick={resetDemo}>Reset demo</button><button onclick={startForReal}>Start for real</button></span></aside>
 {/if}
 
-<main id="main" tabindex="-1">
-  <div class="live-region" aria-live="polite">{notice || error || licenseNotice}</div>
+<main id="main">
+  <div class="live-region" aria-live="polite">{notice || licenseNotice}</div>
+  {#if error}<p class="error page-error" role="alert">{error}</p>{/if}
 
   {#if screen === 'home'}
     <section class="hero" aria-labelledby="lead-title">
       <div class="hero-copy">
-        <p class="slug">No app. No account. No sensor history.</p>
-        <h2 id="lead-title">Phones up.<br />Game on.</h2>
-        <p class="dek">Turn two to four spare phones into motion controllers for fast, original room games. One shared screen runs the action.</p>
+        <p class="slug">Room games for spare phones</p>
+        <h1 id="lead-title" tabindex="-1">Turn phones into motion controllers</h1>
+        <p class="dek">For friends and families who want a room game with spare phones.</p>
         <div class="actions">
-          <button class="primary" onclick={createRoom} disabled={busy}>{busy ? 'Opening room…' : 'Host a game'}</button>
-          <a class="text-link" href="#join">Join with a code ↓</a>
+          <button class="primary" onclick={startDemo}>Try it with sample data</button>
+          <button onclick={createRoom} disabled={busy}>{busy ? 'Opening room…' : 'Host a game'}</button>
+          <a class="text-link" href="#join">Join with a code</a>
         </div>
-        {#if error}<p class="error" role="alert">{error}</p>{/if}
+        <p class="action-note">The sample opens a finished two-player round. Hosting creates a new room code.</p>
+        <ul class="facts" aria-label="Key facts"><li>No app or account is needed.</li><li>Sensor samples leave when the room ends.</li><li>Dead Still is free. Three games cost US $8 once.</li></ul>
       </div>
       <figure class="hero-art">
         <picture>
           <source media="(max-width: 700px)" srcset="/assets/hero-broadsheet-720.webp" />
-          <img src="/assets/hero-broadsheet-1200.webp" width="1200" height="800" alt="Four hands raise plain phones around a table, surrounded by red printed motion arcs." fetchpriority="high" />
+          <img src="/assets/hero-broadsheet-1200.webp" width="1200" height="800" alt="Four hands hold plain phones around a table with red motion arcs." fetchpriority="high" />
         </picture>
-        <figcaption>Yesterday’s phones, tonight’s controllers.</figcaption>
+        <figcaption>Original illustration of phones used as controllers.</figcaption>
       </figure>
     </section>
 
     <section class="how" aria-labelledby="how-title">
-      <p class="section-no">01 / Setup desk</p>
-      <h2 id="how-title">Playing in ninety seconds</h2>
+      <p class="section-no">How it works</p>
+      <h2 id="how-title">Start a room</h2>
       <ol class="steps">
-        <li><strong>Host here.</strong><span>Put this browser on the biggest screen in the room.</span></li>
-        <li><strong>Scan or type.</strong><span>Two to four players join on the same Wi-Fi.</span></li>
-        <li><strong>Grant and hold.</strong><span>Each phone calibrates locally; motion isn’t kept.</span></li>
+        <li><strong>Host a game.</strong><span>Put this browser on the shared screen.</span></li>
+        <li><strong>Join with a code.</strong><span>Players use the six characters from the host.</span></li>
+        <li><strong>Calibrate each phone.</strong><span>Allow motion, or use touch controls instead.</span></li>
       </ol>
     </section>
 
     <section id="join" class="join-desk" aria-labelledby="join-title">
       <div>
-        <p class="section-no">02 / Join desk</p>
-        <h2 id="join-title">Got a room code?</h2>
-        <p>Use the six characters shown on the host screen. No sign-in needed.</p>
+        <p class="section-no">Join a room</p>
+        <h2 id="join-title">Enter a room code</h2>
+        <p>Use the code from the host screen and choose a scoreboard name.</p>
       </div>
       <form onsubmit={(event) => { event.preventDefault(); joinRoom(); }}>
         <label for="room-code">Room code</label>
         <input id="room-code" bind:value={roomCode} maxlength="6" autocomplete="off" autocapitalize="characters" inputmode="text" required aria-describedby="code-help" />
-        <small id="code-help">Letters and numbers, shown by the host.</small>
+        <small id="code-help">Six letters or numbers shown by the host.</small>
         <label for="player-name">Scoreboard name</label>
         <input id="player-name" bind:value={playerName} maxlength="24" autocomplete="nickname" required />
         <button class="primary" type="submit">Join room</button>
-        {#if error}<p class="error" role="alert">{error}</p>{/if}
       </form>
     </section>
 
     <section class="games-preview" aria-labelledby="games-title">
-      <p class="section-no">03 / Evening games</p>
-      <h2 id="games-title">Three ways to move the news</h2>
+      <p class="section-no">Games</p>
+      <h2 id="games-title">Games included</h2>
       <div class="game-grid">
         {#each Object.entries(gameDetails) as [id, game], index}
           <article>
@@ -393,60 +489,60 @@
     </section>
 
     <section class="edition-offer" aria-labelledby="edition-title">
-      <div><p class="section-no">Full edition / One time</p><h2 id="edition-title">All three games. US $8 once.</h2><p>Dead Still stays free. The full edition unlocks News Desk and Ink Runner on this host browser—no subscription.</p></div>
+      <div><p class="section-no">Full edition</p><h2 id="edition-title">Three games for US $8 once</h2><p>Dead Still stays free. A one-time license adds News Desk and Ink Runner. There is no subscription.</p></div>
       <div class="license-actions">
         <a class="primary button-link" href={checkoutUrl}>Buy the full edition</a>
-        <label for="license">Have a license? Paste it</label>
-        <div class="inline-form"><input id="license" bind:value={licenseInput} autocomplete="off" /><button onclick={restoreLicense}>Restore</button></div>
-        {#if premium}<p class="success" role="status">✓ Full edition is unlocked.</p>{/if}
+        <label for="license">Paste a license token</label>
+        <div class="inline-form"><input id="license" bind:value={licenseInput} autocomplete="off" /><button onclick={restoreLicense}>Restore license</button></div>
+        {#if premium}<p class="success" role="status">Full edition is unlocked.</p>{/if}
         {#if licenseNotice}<p class="notice" role="status">{licenseNotice}</p>{/if}
       </div>
     </section>
 
   {:else if screen === 'host'}
     <section class="room-head" aria-labelledby="room-title">
-      <div><p class="slug"><span class:live={connection === 'live'}>● {connection === 'live' ? 'LIVE ROOM' : connection.toUpperCase()}</span></p><h2 id="room-title">Room <span class="room-code">{roomCode}</span></h2><p>Keep this tab open. Phones and host should share Wi-Fi.</p></div>
-      <div class="qr-wrap">
+      <div><p class="slug"><span class:live={connection === 'live'}>● {isDemo ? 'SAMPLE ROOM' : connection === 'live' ? 'LIVE ROOM' : connection.toUpperCase()}</span></p><h1 id="room-title" tabindex="-1">Room <span class="room-code">{roomCode}</span></h1><p>{isDemo ? 'This sample has two calibrated players and a finished round.' : 'Keep this tab open while players join with the room code.'}</p></div>
+      {#if !isDemo}<div class="qr-wrap">
         <div role="img" aria-label={`QR code to join room ${roomCode}`}><canvas bind:this={qrCanvas} width="216" height="216" aria-hidden="true"></canvas></div>
         <button class="quiet" onclick={copyCode}>{copied ? 'Copied' : 'Copy invite'}</button>
-      </div>
+      </div>{/if}
     </section>
 
-    {#if connection === 'lost'}<div class="state-box"><strong>Connection lost.</strong><p>Your code is still reserved. Reconnect the host to continue.</p><button onclick={connectHost}>Reconnect room</button></div>{/if}
+    {#if connection === 'lost'}<div class="state-box"><strong>Connection lost.</strong><p>Your room may still be available. Reconnect the host to continue.</p><button onclick={connectHost}>Reconnect room</button></div>{/if}
 
     {#if phase === 'lobby'}
       <section class="lobby" aria-labelledby="players-title">
-        <div class="section-heading"><div><p class="section-no">Player desk / {players.length} of 4</p><h2 id="players-title">Who’s holding a phone?</h2></div>{#if canCalibrate}<button onclick={askCalibration}>Calibrate all phones</button>{/if}</div>
+        <div class="section-heading"><div><p class="section-no">Players / {players.length} of 4</p><h2 id="players-title">Players in this room</h2></div>{#if canCalibrate}<button onclick={askCalibration}>Calibrate phones</button>{/if}</div>
         {#if players.length === 0}
-          <div class="empty-state"><span class="empty-mark">＋</span><h3>Waiting for players</h3><p>Scan the square or visit this page on a phone and enter <strong>{roomCode}</strong>.</p></div>
+          <div class="empty-state"><span class="empty-mark">＋</span><h3>Waiting for players</h3><p>Scan the code or enter <strong>{roomCode}</strong> on each phone.</p></div>
         {:else}
           <ol class="player-list">
             {#each players as player, index}
-              <li><span class="player-no">{index + 1}</span><strong>{player.name}</strong><span class:ready={player.calibrated}>{player.calibrated ? '✓ Calibrated' : 'Needs calibration'}</span></li>
+              <li><span class="player-no">{index + 1}</span><strong>{player.name}</strong><span class:ready={player.calibrated}>{player.calibrated ? 'Calibrated' : 'Needs calibration'}</span></li>
             {/each}
           </ol>
-          {#if players.length < 2}<p class="notice">One more player is needed. Games support two to four.</p>{/if}
+          {#if players.length < 2}<p class="notice">One more player is needed. Rooms allow two to four players.</p>{/if}
         {/if}
         {#if notice}<p class="notice" role="status">{notice}</p>{/if}
       </section>
 
       <section class="choose-game" aria-labelledby="choose-title">
-        <p class="section-no">Game desk</p><h2 id="choose-title">Choose tonight’s round</h2>
+        <p class="section-no">Choose a game</p><h2 id="choose-title">Start a round</h2>
         <div class="game-grid playable">
           {#each Object.entries(gameDetails) as [id, game], index}
             <article class:locked={game.paid && !premium}>
               <span class="game-number">{String(index + 1).padStart(2, '0')}</span><p class="slug">{game.kicker}</p><h3>{game.name}</h3><p>{game.description}</p>
-              {#if game.paid && !premium}<a class="button-link" href={checkoutUrl}>Unlock — US $8 once</a>{:else}<button class="primary" disabled={!canPlay} onclick={() => startGame(id as GameId)}>Play {game.name}</button>{/if}
+              {#if game.paid && !premium}<a class="button-link" href={checkoutUrl}>Buy for US $8 once</a>{:else}<button class="primary" disabled={!canPlay} onclick={() => startGame(id as GameId)}>Play {game.name}</button>{/if}
             </article>
           {/each}
         </div>
-        {#if !canPlay}<p class="notice">Start unlocks when at least two connected phones are calibrated.</p>{/if}
+        {#if !canPlay}<p class="notice">Start when two to four connected phones are calibrated.</p>{/if}
       </section>
     {:else}
       <section class="round" aria-labelledby="round-title">
-        <div class="round-top"><p class="slug">{selectedGame ? gameDetails[selectedGame].name : ''} / {phase === 'round' ? 'LIVE' : 'FINAL'}</p><span class="timer" aria-label={`${timeLeft} seconds remaining`}>{phase === 'round' ? timeLeft : 'END'}</span></div>
-        <h2 id="round-title" class="cue">{phase === 'round' ? cue : 'Final edition'}</h2>
-        <p class="cue-help">{phase === 'round' ? cueInstruction(cue) : 'The scores are in.'}</p>
+        <div class="round-top"><p class="slug">{selectedGame ? gameDetails[selectedGame].name : ''} / {phase === 'round' ? 'LIVE' : 'RESULTS'}</p><span class="timer" aria-label={`${timeLeft} seconds remaining`}>{phase === 'round' ? timeLeft : 'END'}</span></div>
+        <h2 id="round-title" class="cue">{phase === 'round' ? cue : 'Round results'}</h2>
+        <p class="cue-help">{phase === 'round' ? cueInstruction(cue) : 'Scores from this round.'}</p>
         <ol class="scoreboard">
           {#each sortedResults as player, index}
             <li><span>{index + 1}</span><strong>{player.name}</strong><b>{player.score}</b></li>
@@ -459,22 +555,21 @@
   {:else if screen === 'controller'}
     <section class="controller" aria-labelledby="controller-title">
       <p class="slug"><span class:live={connection === 'live'}>● {connection === 'live' ? `ROOM ${roomCode} LIVE` : connection.toUpperCase()}</span></p>
-      <h2 id="controller-title">{playerName || 'Phone controller'}</h2>
+      <h1 id="controller-title" tabindex="-1">{playerName || 'Phone controller'}</h1>
       <p class="controller-message" aria-live="polite">{controllerMessage}</p>
       {#if controllerCue}<div class="phone-cue" aria-label={`Current cue: ${controllerCue}`}>{controllerCue}</div><p class="phone-score">Score <strong>{controllerScore}</strong></p>{/if}
 
       {#if sensorMode === 'standby'}
-        <div class="empty-state"><span class="empty-mark">◎</span><h3>Connected to the room</h3><p>The host will ask every phone to calibrate together.</p></div>
+        <div class="empty-state"><span class="empty-mark">◎</span><h2>Connected to the room</h2><p>The host will ask every phone to calibrate.</p></div>
       {:else if sensorMode === 'waiting' || sensorMode === 'denied'}
         <div class="permission-sheet">
-          <p class="section-no">Explicit permission</p><h3>Use this phone’s motion?</h3>
-          <p>PairPlay reads tilt and acceleration only while this controller page is open. Samples are relayed to the host room, never saved, sold, or used for ads.</p>
+          <p class="section-no">Motion permission</p><h2>Use this phone’s motion?</h2>
+          <p>PairPlay reads tilt and acceleration while this controller page is open. Samples go only to this live room and are not saved.</p>
           <button class="primary" onclick={enableMotion}>Allow motion and calibrate</button>
           <button onclick={useTouch}>Use touch controls instead</button>
-          {#if error}<p class="error" role="alert">{error}</p>{/if}
         </div>
       {:else if sensorMode === 'calibrating'}
-        <div class="calibration" role="status"><div class="cross"><span></span></div><h3>Hold still</h3><p>Keep the phone upright until the calibration completes.</p></div>
+        <div class="calibration" role="status"><div class="cross"><span></span></div><h2>Hold still</h2><p>Keep the phone upright until calibration completes.</p></div>
       {:else}
         <div class="motion-ready">
           <div class="cross" style={`--mx:${Math.max(-34, Math.min(34, liveGamma - baseGamma))}px;--my:${Math.max(-34, Math.min(34, liveBeta - baseBeta))}px`}><span></span></div>
@@ -490,16 +585,18 @@
           <button class="right" aria-label="Tilt right" onclick={() => pulseMotion(24, 0)}>→</button>
           <button class="down" aria-label="Tilt down" onclick={() => pulseMotion(0, 24)}>↓</button>
         </div>
-        <p class="key-help">Keyboard: arrow keys tilt; Space shakes.</p>
+        <p class="key-help">Keyboard: arrow keys tilt. Space shakes.</p>
       {/if}
       {#if connection === 'lost'}<button class="primary" onclick={() => { screen = 'home'; joinRoom(); }}>Rejoin room</button>{/if}
     </section>
 
   {:else if screen === 'privacy'}
-    <article class="legal"><p class="section-no">Policy / Effective 28 August 2026</p><h2>Privacy, in plain language</h2><p class="dek">Your phone is a controller, not a source of behavioral data.</p><h3>What crosses the room</h3><p>While playing, your chosen scoreboard name and short motion samples travel through PairPlay’s encrypted relay to the host screen. They exist in memory for the live room and are discarded when the room ends or the service restarts.</p><h3>What is stored</h3><p>We keep only a daily aggregate page-view count with no IP address, cookie, fingerprint, motion sample, or player name. If you buy the full edition, your license token and its most recent verification result are stored only in your browser. Sociobot/Dodo, the merchant of record, handles payment details under its own checkout policy.</p><h3>Your controls</h3><p>Deny motion and use touch controls. Close the controller tab to stop all sensor reading. Clear this site’s local storage to remove a saved license. We do not sell data or run advertising trackers.</p><h3>Contact</h3><p>Privacy questions can be sent to <a href="mailto:privacy@sociobot.in">privacy@sociobot.in</a>.</p></article>
+    <article class="legal"><p class="section-no">Policy / Effective 6 September 2026</p><h1 tabindex="-1">Privacy</h1><p class="dek">Your phone controls the game.</p><h2>What moves through a room</h2><p>Your scoreboard name and short motion samples go to the host during a live room. Rooms and motion are not written to the durable SQLite database.</p><h2>What is stored</h2><p>A page view changes only the daily aggregate count. A license token and its latest check stay only in your browser.</p><h2>Your choices</h2><p>You can deny motion and use touch controls. Close the controller tab to stop sensor reading. Clear site storage to remove a license. We do not run advertising trackers.</p><h2>Contact</h2><p>Send privacy questions to <a href="mailto:privacy@sociobot.in">privacy@sociobot.in</a>.</p></article>
+  {:else if screen === 'terms'}
+    <article class="legal"><p class="section-no">Terms / Effective 6 September 2026</p><h1 tabindex="-1">Terms</h1><p class="dek">PairPlay Motion is for ordinary personal use with people in the same room.</p><h2>Play safely</h2><p>Keep a firm grip, use a clear space, and do not throw or strike with a phone. An adult should supervise children. Sensor support varies by phone and browser. Touch controls are the fallback.</p><h2>Full edition</h2><p>The full edition costs US $8 once. It adds News Desk and Ink Runner. Sociobot/Dodo is the merchant of record for checkout and refunds. A refunded or revoked license stops unlocking paid games. Dead Still and accessibility features stay free.</p><h2>Using the service</h2><p>Do not disrupt the relay, inspect other rooms, or use the service unlawfully. Rooms are temporary and availability is not guaranteed. To the extent allowed by law, liability is limited to the amount paid.</p><h2>Contact</h2><p>Send product questions to <a href="mailto:support@sociobot.in">support@sociobot.in</a>.</p></article>
   {:else}
-    <article class="legal"><p class="section-no">Terms / Effective 28 August 2026</p><h2>Terms of play</h2><p class="dek">PairPlay Motion is a room game, offered as-is for ordinary personal use.</p><h3>Play safely</h3><p>Keep a firm grip, use a clear space, and do not throw or strike with a phone. A responsible adult should supervise children. Sensor quality varies by browser and device; touch controls are the supported fallback.</p><h3>Full edition</h3><p>The full edition costs US $8 as a one-time license for the purchaser’s browsers and unlocks News Desk and Ink Runner. Sociobot/Dodo is the merchant of record and handles checkout and refunds. A refunded or revoked license stops unlocking paid games. The free Dead Still game and accessibility features remain available.</p><h3>Service and acceptable use</h3><p>Do not disrupt the relay, probe other rooms, or use the service unlawfully. Rooms are temporary and availability is not guaranteed. To the extent allowed by law, liability is limited to the amount paid for the product.</p><h3>Contact</h3><p>Questions can be sent to <a href="mailto:support@sociobot.in">support@sociobot.in</a>.</p></article>
+    <article class="legal not-found"><p class="section-no">404</p><h1 tabindex="-1">Page not found</h1><p class="dek">This address does not point to a PairPlay page.</p><button class="primary" onclick={() => navigate('home')}>Go to the home page</button></article>
   {/if}
 </main>
 
-<footer><p>PairPlay Motion — an original room game from Param Factory.</p><p>Hero collage generated for this product; no people or brands depicted. <a href="/privacy" onclick={(event) => { event.preventDefault(); navigate('privacy'); }}>Privacy</a> · <a href="/terms" onclick={(event) => { event.preventDefault(); navigate('terms'); }}>Terms</a></p></footer>
+<footer><p>PairPlay Motion — motion games for a shared screen.</p><p>Original generated illustration. <a href="/privacy" onclick={(event) => { event.preventDefault(); navigate('privacy'); }}>Privacy</a> · <a href="/terms" onclick={(event) => { event.preventDefault(); navigate('terms'); }}>Terms</a> · Built by Param Factory · Build v1.0</p></footer>
