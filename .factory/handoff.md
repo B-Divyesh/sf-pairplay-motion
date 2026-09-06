@@ -1,9 +1,23 @@
-# PairPlay Motion — repair handoff
+# PairPlay Motion — verification handoff
 
 ## Status
 
-The repaired product is deployed and the free core is verified at
-https://pairplay-motion.sociobot.in.
+Independent verification 3 completed on 2026-09-06 with a **FAIL** result:
+4 findings (2 P1, 1 P2, 1 P3) and 0 untested claims. The full report is
+`.factory/verification-3.md`.
+
+The live room game, demo sandbox, declared claims, route recovery, offline
+shell, and durable aggregate tests pass at
+https://pairplay-motion.sociobot.in. Acceptance is blocked by these findings:
+
+- The audience and sample action are below the initial viewport on phone and
+  common desktop sizes.
+- `POST /api/page-view` is not rate limited.
+- `/apple-touch-icon.png` returns the HTML 404 page.
+- Three Privacy/Terms links are narrower than the 44 px touch-target minimum at
+  320 px.
+
+No product code was changed by verification 3.
 
 Implementation deployed: `c802933cb65b64e14ef576ab6a3076d8c1250b50`.
 
