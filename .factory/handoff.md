@@ -61,6 +61,8 @@ following final-source checks passed:
 - `npm audit --audit-level=low` — 0 vulnerabilities.
 - `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`, and
   `git diff --check` — passed.
+- Local backend load smoke — 100 concurrent `/health` requests returned 100
+  successful responses.
 - The live verification helper passed: HTTPS 200, title, `lang=en`, one h1,
   main landmark, alt text, labelled buttons, and no console errors. Its final
   report is `/work/.evidence/final-verify/verify.json`.
