@@ -199,10 +199,10 @@ async fn main() -> anyhow::Result<()> {
 fn default_database_url() -> String {
     env::var("DATABASE_URL").unwrap_or_else(|_| {
         if Path::new("/data").is_dir() {
-            // A previous failed revision left a stale lock on pairplay.db in
-            // the Azure Files share. Leave that file alone and use this fresh
-            // product-owned durable database for the current schema.
-            "sqlite:///data/pairplay-motion.db?mode=rwc".into()
+            // Failed revisions may retain an SMB lock while the platform
+            // overlaps old and new replicas. Leave those files untouched and
+            // use the current product-owned durable database.
+            "sqlite:///data/pairplay-motion-v2.db?mode=rwc".into()
         } else {
             "sqlite://data/pairplay.db?mode=rwc".into()
         }
@@ -212,8 +212,15 @@ fn default_database_url() -> String {
 async fn run_migrations(db: &SqlitePool) -> anyhow::Result<()> {
     const ATTEMPTS: u32 = 20;
     for attempt in 1..=ATTEMPTS {
-        match sqlx::migrate!().run(db).await {
-            Ok(()) => return Ok(()),
+        // This product has one idempotent schema statement. sqlx's migration
+        // runner takes a long-lived exclusive migration lock that Azure Files
+        // rejects during a revision overlap. Execute the checked-in statement
+        // directly instead; normal SQLite schema locking remains short-lived.
+        match sqlx::query(include_str!("../migrations/0001_page_views.sql"))
+            .execute(db)
+            .await
+        {
+            Ok(_) => return Ok(()),
             Err(error) if database_locked(&error) && attempt < ATTEMPTS => {
                 warn!(attempt, "SQLite startup lock; retrying migration");
                 tokio::time::sleep(Duration::from_millis(500)).await;
@@ -224,7 +231,7 @@ async fn run_migrations(db: &SqlitePool) -> anyhow::Result<()> {
     unreachable!("the final migration attempt returns above")
 }
 
-fn database_locked(error: &sqlx::migrate::MigrateError) -> bool {
+fn database_locked(error: &sqlx::Error) -> bool {
     let message = error.to_string().to_ascii_lowercase();
     message.contains("database is locked") || message.contains("database schema is locked")
 }
