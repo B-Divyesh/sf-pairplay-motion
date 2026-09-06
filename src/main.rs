@@ -25,7 +25,7 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::{
-    sqlite::{SqliteConnectOptions, SqlitePoolOptions},
+    sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
     SqlitePool,
 };
 use tokio::sync::{mpsc, Mutex, RwLock};
@@ -152,6 +152,10 @@ async fn main() -> anyhow::Result<()> {
     }
     let options = SqliteConnectOptions::from_str(&database_url)?
         .create_if_missing(true)
+        // Azure Files is an SMB share. SQLite WAL uses a shared-memory file
+        // and byte-range locks that are unreliable there; rollback journals
+        // keep the single durable writer compatible with the mounted share.
+        .journal_mode(SqliteJournalMode::Delete)
         .busy_timeout(Duration::from_secs(5));
     let db = SqlitePoolOptions::new()
         // A SQLite file on the product's Azure Files mount has one writer.
